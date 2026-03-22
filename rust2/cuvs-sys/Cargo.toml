@@ -12,6 +12,11 @@ homepage.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = []
+vendored = ["cmake"]
+
 [build-dependencies]
 bindgen = "0.72"
+cmake = { version = "0.1", optional = true }
 cmake-package = "0.1"
