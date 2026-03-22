@@ -182,6 +182,7 @@ fn locate_cuvs() -> String {
     std::process::exit(1);
 }
 
+#[cfg(feature = "generate-bindings")]
 fn generate_bindings(include_dir: &str) {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set by Cargo"));
 
@@ -199,7 +200,18 @@ fn generate_bindings(include_dir: &str) {
         .expect("failed to write cuvs_bindings.rs");
 }
 
+#[cfg(not(feature = "generate-bindings"))]
+fn generate_bindings(_include_dir: &str) {
+    // Pre-generated bindings are used from src/bindings.rs.
+}
+
 fn main() {
+    // docs.rs builds have no CUDA/cuVS. Skip discovery and linking entirely;
+    // the pre-generated bindings in src/bindings.rs are sufficient for docs.
+    if std::env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
     println!("cargo:rerun-if-changed=cuvs_c_wrapper.h");
     println!("cargo:rerun-if-changed=vendor/dlpack/dlpack.h");
     println!("cargo:rerun-if-env-changed=CMAKE_PREFIX_PATH");

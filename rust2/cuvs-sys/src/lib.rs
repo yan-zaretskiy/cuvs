@@ -14,4 +14,10 @@
 #![allow(non_snake_case)]
 #![allow(unused_attributes)]
 
+// Use pre-generated bindings by default.
+// When the `generate-bindings` feature is enabled, use freshly generated ones.
+#[cfg(feature = "generate-bindings")]
 include!(concat!(env!("OUT_DIR"), "/cuvs_bindings.rs"));
+
+#[cfg(not(feature = "generate-bindings"))]
+include!("bindings.rs");

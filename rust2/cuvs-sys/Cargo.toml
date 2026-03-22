@@ -15,8 +15,9 @@ license.workspace = true
 [features]
 default = []
 vendored = ["cmake"]
+generate-bindings = ["bindgen"]
 
 [build-dependencies]
-bindgen = "0.72"
+bindgen = { version = "0.72", optional = true }
 cmake = { version = "0.1", optional = true }
 cmake-package = "0.1"
