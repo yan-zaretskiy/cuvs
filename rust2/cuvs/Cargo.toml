@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cuvs"
+description = "RAPIDS cuVS — GPU-accelerated vector search"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+cuvs-sys = { path = "../cuvs-sys", version = "26.6.0" }

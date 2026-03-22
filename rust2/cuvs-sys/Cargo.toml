@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "cuvs-sys"
+description = "Raw FFI bindings to libcuvs_c — NVIDIA cuVS GPU-accelerated vector search"
+links = "cuvs_c"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[build-dependencies]
+bindgen = "0.72"
+cmake-package = "0.1"
