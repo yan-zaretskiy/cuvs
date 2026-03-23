@@ -13,3 +13,4 @@ license.workspace = true
 
 [dependencies]
 cuvs-sys.workspace = true
+thiserror = "2"

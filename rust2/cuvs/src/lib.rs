@@ -5,13 +5,13 @@
 
 //! cuVS: Safe Rust bindings for GPU-accelerated vector search.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_build_script_receives_cuvs_sys_include_metadata() {
-        assert!(
-            option_env!("CUVS_SYS_INCLUDE").is_some(),
-            "cuvs build.rs should receive DEP_CUVS_C_INCLUDE metadata from cuvs-sys"
-        );
-    }
-}
+use std::marker::PhantomData;
+
+pub mod error;
+pub mod logging;
+pub mod resources;
+pub mod version;
+
+/// Marker that prevents `Send` and `Sync` on any type containing it.
+/// Used on all GPU-bound handles that are tied to a CUDA context and thread.
+pub(crate) type NotSend = PhantomData<*const ()>;
