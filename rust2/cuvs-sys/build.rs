@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cmake_package::find_package;
+use cmake_package::{Error as CmakeError, VersionError};
 
 const CUVS_COMPONENT: &str = "c_api";
 #[cfg(feature = "vendored")]
@@ -16,46 +17,78 @@ const DEFAULT_CPP_SOURCE: &str = "../../cpp";
 // CMake package discovery
 // ---------------------------------------------------------------------------
 
+/// Discovery error with enough context for actionable error messages.
+enum DiscoveryError {
+    /// A cuVS library was found but with an incompatible version.
+    VersionMismatch { found: String },
+    /// CMake is not installed or too old.
+    CmakeUnavailable,
+    /// No cuVS library was found.
+    NotFound,
+}
+
 /// Run CMake `find_package(cuvs)` and extract the include directory.
 /// Calls `CMakeTarget::link()` to emit the full set of cargo link directives,
 /// preserving all link libraries, directories, and options from the CMake target.
-fn try_find_cuvs_package() -> Option<String> {
-    let package = find_package("cuvs")
-        .components([CUVS_COMPONENT.to_owned()])
-        .find()
-        .ok()?;
-    let target = package.target("cuvs::c_api")?;
-    let include_dir = target.include_directories.first()?.clone();
+///
+/// When `prefixes` is provided, they are passed as `CMAKE_PREFIX_PATH` so CMake
+/// searches under those installation roots (e.g. `<prefix>/lib/cmake/cuvs`).
+fn try_find_cuvs_package(prefixes: Option<Vec<PathBuf>>) -> Result<String, DiscoveryError> {
+    let mut builder = find_package("cuvs")
+        .version(std::env::var("CARGO_PKG_VERSION").unwrap())
+        .components([CUVS_COMPONENT.to_owned()]);
+    if let Some(paths) = prefixes {
+        builder = builder.prefix_paths(paths);
+    }
+    let package = builder.find().map_err(|e| match e {
+        CmakeError::Version(VersionError::VersionTooOld(v)) => DiscoveryError::VersionMismatch {
+            found: format!("{}.{}.{}", v.major, v.minor, v.patch),
+        },
+        CmakeError::CMakeNotFound | CmakeError::UnsupportedCMakeVersion => {
+            DiscoveryError::CmakeUnavailable
+        }
+        _ => DiscoveryError::NotFound,
+    })?;
+
+    let target = package
+        .target("cuvs::c_api")
+        .ok_or(DiscoveryError::NotFound)?;
+
+    let include_dir = target
+        .include_directories
+        .first()
+        .cloned()
+        .ok_or(DiscoveryError::NotFound)?;
+
     target.link();
-    Some(include_dir)
+
+    Ok(include_dir)
 }
 
 /// Try to discover a pip-installed cuVS.
-/// The pip package places files under `site-packages/libcuvs/lib64/`, which
-/// CMake doesn't search via prefix paths, so we set `cuvs_DIR` directly.
-fn try_discover_pip() -> Option<String> {
-    let prefix = pip_cuvs_prefix()?;
-    let cmake_dir = prefix.join("lib64/cmake/cuvs");
-    if !cmake_dir.is_dir() {
-        return None;
-    }
-    // SAFETY: build scripts are single-threaded, so mutating the process
-    // environment is safe here.
-    unsafe { std::env::set_var("cuvs_DIR", &cmake_dir) };
-    try_find_cuvs_package()
+/// The pip package places files under `site-packages/libcuvs/`, which CMake
+/// doesn't search by default. We pass it as a prefix path so CMake looks for
+/// config files under `<prefix>/lib[64]/cmake/cuvs/`.
+fn try_discover_pip() -> Result<String, DiscoveryError> {
+    let prefix = pip_cuvs_prefix().ok_or(DiscoveryError::NotFound)?;
+    try_find_cuvs_package(Some(vec![prefix]))
 }
-
-// ---------------------------------------------------------------------------
-// Pip prefix detection helpers
-// ---------------------------------------------------------------------------
 
 /// Try to find a pip-installed cuVS by locating `site-packages/libcuvs`.
 /// Checks both the active venv (via VIRTUAL_ENV) and the system python.
 fn pip_cuvs_prefix() -> Option<PathBuf> {
     // If a venv is active, check its site-packages first.
+    // Venvs have a single lib/python3.XX/ directory.
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        if let Some(prefix) = find_libcuvs_in_prefix(Path::new(&venv)) {
-            return Some(prefix);
+        let lib_dir = Path::new(&venv).join("lib");
+        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
+            let candidate = entries
+                .filter_map(|e| e.ok())
+                .find(|e| e.file_name().as_encoded_bytes().starts_with(b"python"))
+                .map(|e| e.path().join("site-packages/libcuvs"));
+            if let Some(prefix) = candidate.filter(|p| p.is_dir()) {
+                return Some(prefix);
+            }
         }
     }
 
@@ -75,34 +108,18 @@ fn pip_cuvs_prefix() -> Option<PathBuf> {
     prefix.is_dir().then_some(prefix)
 }
 
-/// Look for `lib/python*/site-packages/libcuvs` under a given prefix.
-fn find_libcuvs_in_prefix(prefix: &Path) -> Option<PathBuf> {
-    let lib_dir = prefix.join("lib");
-    for entry in std::fs::read_dir(&lib_dir).ok()? {
-        let entry = entry.ok()?;
-        let name = entry.file_name();
-        if name.as_encoded_bytes().starts_with(b"python") {
-            let candidate = entry.path().join("site-packages").join("libcuvs");
-            if candidate.is_dir() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 // ---------------------------------------------------------------------------
 // Vendored build
 // ---------------------------------------------------------------------------
 
 /// Build cuVS from source, then discover it via CMake against the install prefix.
 #[cfg(feature = "vendored")]
-fn try_build_and_discover() -> Option<String> {
+fn try_vendored() -> Option<String> {
     let cpp_source =
         std::env::var("CUVS_CPP_SOURCE").unwrap_or_else(|_| DEFAULT_CPP_SOURCE.to_owned());
 
     // Tell Cargo to rerun build.rs when the C++ source tree changes.
-    println!("cargo:rerun-if-changed={cpp_source}");
+    println!("cargo::rerun-if-changed={cpp_source}");
 
     let install_prefix = cmake::Config::new(&cpp_source)
         .generator("Ninja")
@@ -119,20 +136,7 @@ fn try_build_and_discover() -> Option<String> {
         .build();
 
     // Point CMake at the freshly-built install and discover it like any other.
-    let cmake_dir = ["lib/cmake/cuvs", "lib64/cmake/cuvs"]
-        .iter()
-        .map(|p| install_prefix.join(p))
-        .find(|p| p.is_dir())
-        .expect("vendored build did not produce cmake config files");
-
-    // SAFETY: build scripts are single-threaded.
-    unsafe { std::env::set_var("cuvs_DIR", &cmake_dir) };
-    try_find_cuvs_package()
-}
-
-#[cfg(feature = "vendored")]
-fn try_vendored() -> Option<String> {
-    try_build_and_discover()
+    try_find_cuvs_package(Some(vec![install_prefix])).ok()
 }
 
 #[cfg(not(feature = "vendored"))]
@@ -152,33 +156,83 @@ fn locate_cuvs() -> String {
         return try_vendored().expect("vendored feature enabled but build from source failed");
     }
 
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+
     // If the user explicitly set cuvs_DIR, honor it and fail fast if it doesn't work.
-    if std::env::var("cuvs_DIR").is_ok() {
-        if let Some(dir) = try_find_cuvs_package() {
-            return dir;
+    if let Some(cuvs_dir) = std::env::var("cuvs_DIR").ok().filter(|s| !s.is_empty()) {
+        match try_find_cuvs_package(None) {
+            Ok(dir) => return dir,
+            Err(DiscoveryError::VersionMismatch { found }) => {
+                eprintln!(
+                    "error: cuvs_DIR is set to '{cuvs_dir}' which contains cuVS {found}, \
+                     but cuvs-sys requires {version}."
+                );
+            }
+            Err(DiscoveryError::CmakeUnavailable) => {
+                eprintln!(
+                    "error: CMake is not installed or too old (3.19+ required). \
+                     Install CMake and try again."
+                );
+            }
+            Err(DiscoveryError::NotFound) => {
+                eprintln!(
+                    "error: cuvs_DIR is set to '{cuvs_dir}' but CMake could not find cuVS \
+                     at that location."
+                );
+            }
         }
-        eprintln!("error: cuvs_DIR is set but CMake could not find cuVS at that location.");
         std::process::exit(1);
     }
 
-    // Try system discovery: conda, system install, tarball, CMAKE_PREFIX_PATH.
-    if let Some(dir) = try_find_cuvs_package() {
-        return dir;
+    // Track version mismatches across discovery attempts for a better error message.
+    let mut found_version: Option<String> = None;
+
+    let strategies: [&dyn Fn() -> Result<String, DiscoveryError>; 2] = [
+        &|| try_find_cuvs_package(None), // system/conda/CMAKE_PREFIX_PATH
+        &try_discover_pip,               // pip site-packages
+    ];
+
+    for discover in strategies {
+        match discover() {
+            Ok(dir) => return dir,
+            Err(DiscoveryError::VersionMismatch { found }) => {
+                found_version = Some(found);
+            }
+            Err(DiscoveryError::CmakeUnavailable) => {
+                eprintln!(
+                    "error: CMake is not installed or too old (3.19+ required). \
+                     Install CMake and try again."
+                );
+                std::process::exit(1);
+            }
+            Err(DiscoveryError::NotFound) => continue,
+        }
     }
 
-    // Try pip-installed cuVS.
-    if let Some(dir) = try_discover_pip() {
-        return dir;
+    if let Some(found) = found_version {
+        eprintln!(
+            "error: Found cuVS {found}, but cuvs-sys requires {version}.\n\
+             \n\
+             Install cuVS {version} via one of:\n\
+             - conda: conda install -c rapidsai libcuvs={version}\n\
+             - pip:   pip install libcuvs-cu<CUDA_VERSION>\n\
+             Or update the cuvs-sys crate to match your installed library."
+        );
+    } else {
+        eprintln!(
+            "error: Could not find cuVS {version} CMake package.\n\
+             \n\
+             Searched:\n\
+             - CMake default search paths (CMAKE_PREFIX_PATH, system paths)\n\
+             - pip site-packages (VIRTUAL_ENV, python3 sysconfig)\n\
+             \n\
+             Install cuVS {version} via one of:\n\
+             - conda: conda install -c rapidsai libcuvs={version}\n\
+             - pip:   pip install libcuvs-cu<CUDA_VERSION>\n\
+             Or set cuvs_DIR or CMAKE_PREFIX_PATH to point to your cuVS {version} installation.\n\
+             Or enable the 'vendored' feature to build from source."
+        );
     }
-
-    eprintln!(
-        "error: Could not find the cuVS CMake package.\n\
-         Install cuVS via one of:\n\
-         - conda: conda install -c rapidsai libcuvs\n\
-         - pip:   pip install cuvs-cu13\n\
-         Or set CMAKE_PREFIX_PATH to point to your cuVS installation.\n\
-         Or enable the 'vendored' feature to build from source."
-    );
     std::process::exit(1);
 }
 
@@ -194,6 +248,7 @@ fn generate_bindings(include_dir: &str) {
         .rustified_enum("(cuvs|DL).*")
         .clang_arg(format!("-I{include_dir}"))
         .clang_arg("-Ivendor") // vendored dlpack header
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("bindgen failed to generate cuvs bindings")
         .write_to_file(out_dir.join("cuvs_bindings.rs"))
@@ -212,17 +267,16 @@ fn main() {
         return;
     }
 
-    println!("cargo:rerun-if-changed=cuvs_c_wrapper.h");
-    println!("cargo:rerun-if-changed=vendor/dlpack/dlpack.h");
-    println!("cargo:rerun-if-env-changed=CMAKE_PREFIX_PATH");
-    println!("cargo:rerun-if-env-changed=VIRTUAL_ENV");
-    println!("cargo:rerun-if-env-changed=cuvs_DIR");
-    println!("cargo:rerun-if-env-changed=CUVS_CPP_SOURCE");
-
     let include_dir = locate_cuvs();
 
+    println!("cargo::rerun-if-env-changed=CMAKE_PREFIX_PATH");
+    println!("cargo::rerun-if-env-changed=VIRTUAL_ENV");
+    println!("cargo::rerun-if-env-changed=cuvs_DIR");
+    #[cfg(feature = "vendored")]
+    println!("cargo::rerun-if-env-changed=CUVS_CPP_SOURCE");
+
     // Expose include path to downstream crates via DEP_CUVS_C_INCLUDE.
-    println!("cargo:include={include_dir}");
+    println!("cargo::metadata=include={include_dir}");
 
     generate_bindings(&include_dir);
 }

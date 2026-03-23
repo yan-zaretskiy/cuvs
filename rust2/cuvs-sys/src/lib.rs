@@ -16,6 +16,9 @@
 
 // Use pre-generated bindings by default.
 // When the `generate-bindings` feature is enabled, use freshly generated ones.
+#[cfg(all(feature = "generate-bindings", docsrs))]
+compile_error!("generate-bindings is incompatible with docs.rs builds");
+
 #[cfg(feature = "generate-bindings")]
 include!(concat!(env!("OUT_DIR"), "/cuvs_bindings.rs"));
 

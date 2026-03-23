@@ -12,4 +12,4 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-cuvs-sys = { path = "../cuvs-sys", version = "26.6.0" }
+cuvs-sys.workspace = true

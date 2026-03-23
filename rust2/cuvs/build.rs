@@ -6,7 +6,11 @@
 use std::env;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=DEP_CUVS_C_INCLUDE");
+    if env::var("DOCS_RS").is_ok() {
+        return;
+    }
+
+    println!("cargo::rerun-if-env-changed=DEP_CUVS_C_INCLUDE");
 
     match env::var_os("DEP_CUVS_C_INCLUDE") {
         Some(include_paths) => {

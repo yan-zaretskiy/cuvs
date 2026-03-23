@@ -12,3 +12,6 @@ repository = "https://github.com/rapidsai/cuvs"
 homepage = "https://github.com/rapidsai/cuvs"
 authors = ["NVIDIA Corporation"]
 license = "Apache-2.0"
+
+[workspace.dependencies]
+cuvs-sys = { path = "cuvs-sys", version = "26.6.0" }
