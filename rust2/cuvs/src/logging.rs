@@ -9,19 +9,21 @@
 //! goes directly to stderr via `rapids_logger`. It is **global process state**
 //! and is **not thread-safe**.
 
+use crate::ffi;
+
 /// Re-export of `cuvsLogLevel_t` — the C library's log verbosity levels.
-pub use cuvs_sys::cuvsLogLevel_t as LogLevel;
+pub use ffi::cuvsLogLevel_t as LogLevel;
 
 /// Returns the current cuVS C library log level.
 pub fn get_log_level() -> LogLevel {
     // SAFETY: cuvsGetLogLevel has no preconditions and cannot fail.
-    unsafe { cuvs_sys::cuvsGetLogLevel() }
+    unsafe { ffi::cuvsGetLogLevel() }
 }
 
 /// Sets the cuVS C library log level.
 pub fn set_log_level(level: LogLevel) {
     // SAFETY: cuvsSetLogLevel has no preconditions and cannot fail.
-    unsafe { cuvs_sys::cuvsSetLogLevel(level) }
+    unsafe { ffi::cuvsSetLogLevel(level) }
 }
 
 #[cfg(test)]

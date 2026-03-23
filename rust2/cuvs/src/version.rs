@@ -5,6 +5,7 @@
 
 //! cuVS library version query.
 
+use crate::ffi;
 use crate::error::{LibraryError, check_cuvs};
 
 /// Returns the cuVS library version as `(major, minor, patch)`.
@@ -15,7 +16,7 @@ pub fn version() -> Result<(u16, u16, u16), LibraryError> {
 
     // SAFETY:
     // - All three pointers are valid, aligned `u16` locals.
-    let status = unsafe { cuvs_sys::cuvsVersionGet(&mut major, &mut minor, &mut patch) };
+    let status = unsafe { ffi::cuvsVersionGet(&mut major, &mut minor, &mut patch) };
     check_cuvs(status)?;
     Ok((major, minor, patch))
 }

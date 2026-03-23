@@ -7,6 +7,8 @@
 
 use std::marker::PhantomData;
 
+use cuvs_sys as ffi;
+
 pub mod error;
 pub mod logging;
 pub mod resources;
