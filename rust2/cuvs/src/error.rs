@@ -5,6 +5,7 @@
 
 //! Error types for the cuVS safe bindings.
 
+use std::borrow::Cow;
 use std::ffi::CStr;
 
 use crate::ffi;
@@ -12,7 +13,7 @@ use crate::ffi;
 /// An error reported by the cuVS C library.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub struct LibraryError(pub(crate) String);
+pub struct LibraryError(pub(crate) Cow<'static, str>);
 
 /// Check the return status of a cuVS C API call.
 ///
@@ -26,16 +27,16 @@ pub(crate) fn check_cuvs(status: ffi::cuvsError_t) -> Result<(), LibraryError> {
     // SAFETY:
     // - cuvsGetLastErrorText() returns a pointer to thread-local storage
     //   that is valid until the next FFI call on this thread.
+    // - It may return NULL if no error text has been set.
     // - We copy the string immediately, so the pointer is not held past
     //   any subsequent FFI call.
-    let msg = unsafe { ffi::cuvsGetLastErrorText() };
-    let msg = if msg.is_null() {
-        "unknown cuVS error".to_owned()
-    } else {
-        // SAFETY: The pointer is non-null (checked above).
-        unsafe { CStr::from_ptr(msg) }
-            .to_string_lossy()
-            .into_owned()
+    let msg = unsafe {
+        let text_ptr = ffi::cuvsGetLastErrorText();
+        if text_ptr.is_null() {
+            Cow::Borrowed("unknown cuVS error")
+        } else {
+            Cow::Owned(CStr::from_ptr(text_ptr).to_string_lossy().into_owned())
+        }
     };
 
     Err(LibraryError(msg))

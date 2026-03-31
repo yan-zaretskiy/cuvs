@@ -1,0 +1,16 @@
+name: cuvs-rust
+channels:
+  - rapidsai
+  - conda-forge
+dependencies:
+  - libcuvs
+  - cuda-version=13
+  - cmake>=3.19
+  - ninja
+  - rust
+  - pip
+  - pip:
+    - --index-url https://download.pytorch.org/whl/cu130
+    - torch==2.11.0
+variables:
+  LIBTORCH_USE_PYTORCH: "1"

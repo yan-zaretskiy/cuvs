@@ -27,6 +27,7 @@ dask-worker-space/
 bench/ann/data
 temporary_*.json
 rust/target/
+rust2/target/
 rust/Cargo.lock
 rmm_log.txt
 

@@ -9,8 +9,10 @@ use std::marker::PhantomData;
 
 use cuvs_sys as ffi;
 
+pub mod dlpack;
 pub mod error;
 pub mod logging;
+pub mod neighbors;
 pub mod resources;
 pub mod version;
 

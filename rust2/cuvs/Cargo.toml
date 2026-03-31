@@ -10,7 +10,20 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 license.workspace = true
+build = "build.rs"
+
+[features]
+ndarray = ["dep:ndarray"]
+torch = ["dep:tch", "dep:torch-sys"]
 
 [dependencies]
 cuvs-sys.workspace = true
+ndarray = { version = "0.17", optional = true }
+tch = { version = "0.24", optional = true }
+torch-sys = { version = "0.24", optional = true }
 thiserror = "2"
+tinyvec = { version = "1", features = ["latest_stable_rust"] }
+
+[dev-dependencies]
+ndarray = "0.17"
+tch = "0.24"

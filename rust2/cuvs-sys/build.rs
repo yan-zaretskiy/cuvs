@@ -4,7 +4,8 @@
  */
 
 #[cfg(not(feature = "vendored"))]
-use std::{path::Path, process::Command};
+use std::process::Command;
+use std::path::Path;
 use std::path::PathBuf;
 
 use cmake_package::find_package;
@@ -15,6 +16,11 @@ const CUVS_COMPONENT: &str = "c_api";
 #[cfg(feature = "vendored")]
 const DEFAULT_CPP_SOURCE: &str = "../../cpp";
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+struct CuvsMetadata {
+    include_dir: String,
+    lib_dir: String,
+}
 
 // ---------------------------------------------------------------------------
 // CMake package discovery
@@ -45,13 +51,13 @@ enum DiscoveryError {
     NotFound,
 }
 
-/// Run CMake `find_package(cuvs)` and extract the include directory.
+/// Run CMake `find_package(cuvs)` and extract the include and library directories.
 /// Calls `CMakeTarget::link()` to emit the full set of cargo link directives,
 /// preserving all link libraries, directories, and options from the CMake target.
 ///
 /// When `prefix` is provided, it is passed as `CMAKE_PREFIX_PATH` so CMake
 /// searches under that installation root (e.g. `<prefix>/lib/cmake/cuvs`).
-fn try_find_cuvs_package(prefix: Option<PathBuf>) -> Result<String, DiscoveryError> {
+fn try_find_cuvs_package(prefix: Option<PathBuf>) -> Result<CuvsMetadata, DiscoveryError> {
     let mut builder = find_package("cuvs")
         .version(PACKAGE_VERSION)
         .components([CUVS_COMPONENT.to_owned()]);
@@ -81,9 +87,21 @@ fn try_find_cuvs_package(prefix: Option<PathBuf>) -> Result<String, DiscoveryErr
         .cloned()
         .ok_or(DiscoveryError::NotFound)?;
 
+    let lib_dir = target
+        .location
+        .as_deref()
+        .and_then(|location| Path::new(location).parent())
+        .and_then(|path| path.to_str())
+        .map(str::to_owned)
+        .or_else(|| target.link_directories.first().cloned())
+        .ok_or(DiscoveryError::NotFound)?;
+
     target.link();
 
-    Ok(include_dir)
+    Ok(CuvsMetadata {
+        include_dir,
+        lib_dir,
+    })
 }
 
 /// Try to discover a pip-installed cuVS.
@@ -91,7 +109,7 @@ fn try_find_cuvs_package(prefix: Option<PathBuf>) -> Result<String, DiscoveryErr
 /// which CMake does not locate from a generic prefix path. Point `cuvs_DIR`
 /// directly at the package config directory for this discovery attempt.
 #[cfg(not(feature = "vendored"))]
-fn try_discover_pip() -> Result<String, DiscoveryError> {
+fn try_discover_pip() -> Result<CuvsMetadata, DiscoveryError> {
     let cmake_dir = pip_cuvs_cmake_dir().ok_or(DiscoveryError::NotFound)?;
     // SAFETY: build scripts are single-threaded, so mutating the process
     // environment is safe here.
@@ -107,14 +125,13 @@ fn pip_cuvs_cmake_dir() -> Option<PathBuf> {
     // Venvs have a single lib/python3.XX/ directory.
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
         let lib_dir = Path::new(&venv).join("lib");
-        if let Ok(entries) = std::fs::read_dir(&lib_dir) {
-            if let Some(prefix) = entries
+        if let Ok(entries) = std::fs::read_dir(&lib_dir)
+            && let Some(prefix) = entries
                 .filter_map(|e| e.ok())
                 .map(|entry| entry.path().join("site-packages/libcuvs/lib64/cmake/cuvs"))
                 .find(|path| path.is_dir())
-            {
-                return Some(prefix);
-            }
+        {
+            return Some(prefix);
         }
     }
 
@@ -140,7 +157,7 @@ fn pip_cuvs_cmake_dir() -> Option<PathBuf> {
 
 /// Build cuVS from source, then discover it via CMake against the install prefix.
 #[cfg(feature = "vendored")]
-fn locate_cuvs() -> Result<String, DiscoveryError> {
+fn locate_cuvs() -> Result<CuvsMetadata, DiscoveryError> {
     let cpp_source =
         std::env::var("CUVS_CPP_SOURCE").unwrap_or_else(|_| DEFAULT_CPP_SOURCE.to_owned());
 
@@ -172,9 +189,9 @@ fn locate_cuvs() -> Result<String, DiscoveryError> {
 /// Locate cuVS and emit all cargo link directives.
 /// Returns the include directory for bindgen or a typed discovery error.
 #[cfg(not(feature = "vendored"))]
-fn locate_cuvs() -> Result<String, DiscoveryError> {
+fn locate_cuvs() -> Result<CuvsMetadata, DiscoveryError> {
     match try_find_cuvs_package(None) {
-        Ok(dir) => Ok(dir),
+        Ok(metadata) => Ok(metadata),
         Err(DiscoveryError::NotFound) => try_discover_pip(),
         Err(DiscoveryError::VersionMismatch { found, .. }) => match try_discover_pip() {
             Err(DiscoveryError::NotFound) => Err(DiscoveryError::VersionMismatch {
@@ -224,8 +241,8 @@ fn main() {
         return;
     }
 
-    let include_dir = match locate_cuvs() {
-        Ok(include_dir) => include_dir,
+    let metadata = match locate_cuvs() {
+        Ok(metadata) => metadata,
         Err(error) => {
             eprintln!("error: {error}");
             std::process::exit(1);
@@ -233,7 +250,9 @@ fn main() {
     };
 
     // Expose include path to downstream crates via DEP_CUVS_C_INCLUDE.
-    println!("cargo::metadata=include={include_dir}");
+    println!("cargo::metadata=include={}", metadata.include_dir);
+    // Expose the directory containing libcuvs_c.so via DEP_CUVS_C_LIB.
+    println!("cargo::metadata=lib={}", metadata.lib_dir);
 
-    generate_bindings(&include_dir);
+    generate_bindings(&metadata.include_dir);
 }
