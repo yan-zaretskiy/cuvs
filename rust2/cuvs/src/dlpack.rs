@@ -154,11 +154,6 @@ impl MutBorrowedDLTensor<'_> {
     pub(crate) fn as_ptr(&self) -> *mut ffi::DLManagedTensor {
         bind_dl_managed_ptr(&self.managed, &self.shape, &self.strides)
     }
-
-    #[cfg(test)]
-    fn managed_ref(&self) -> &ffi::DLManagedTensor {
-        unsafe { &*self.managed.get() }
-    }
 }
 
 // ---------------------------------------------------------------------------

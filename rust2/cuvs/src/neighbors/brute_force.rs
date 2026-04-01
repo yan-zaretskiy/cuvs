@@ -12,6 +12,7 @@ use std::ffi::CString;
 use std::marker::PhantomData;
 use std::path::Path;
 
+use crate::distance::DistanceType;
 use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
 use crate::error::{LibraryError, check_cuvs};
 use crate::resources::Resources;
@@ -47,7 +48,7 @@ impl<'d> Index<'d> {
     pub fn build(
         res: &Resources,
         dataset: &BorrowedDLTensor<'d>,
-        metric: ffi::cuvsDistanceType,
+        metric: DistanceType,
         metric_arg: f32,
     ) -> Result<Self, BruteForceError> {
         let mut handle: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
@@ -70,7 +71,7 @@ impl<'d> Index<'d> {
             ffi::cuvsBruteForceBuild(
                 res.handle(),
                 dataset.as_ptr(),
-                metric,
+                metric.into(),
                 metric_arg,
                 idx.handle,
             )
@@ -156,6 +157,7 @@ impl<'d> Index<'d> {
 #[cfg(all(test, feature = "torch"))]
 mod tests {
     use super::*;
+    use crate::distance::DistanceType;
     use crate::dlpack::MutBorrowedDLTensor;
     use crate::resources::Resources;
 
@@ -179,7 +181,7 @@ mod tests {
         let index = Index::build(
             &res,
             &dataset_dl,
-            ffi::cuvsDistanceType::L2Expanded,
+            DistanceType::L2Expanded,
             0.0,
         )
         .unwrap();
