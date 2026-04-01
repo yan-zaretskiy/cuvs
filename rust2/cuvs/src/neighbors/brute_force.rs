@@ -12,7 +12,7 @@ use std::ffi::CString;
 use std::marker::PhantomData;
 use std::path::Path;
 
-use crate::dlpack::BorrowedDLTensor;
+use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
 use crate::error::{LibraryError, check_cuvs};
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
@@ -46,49 +46,51 @@ impl<'d> Index<'d> {
     /// `res` is only used for the duration of this call.
     pub fn build(
         res: &Resources,
-        dataset: &mut BorrowedDLTensor<'d>,
+        dataset: &BorrowedDLTensor<'d>,
         metric: ffi::cuvsDistanceType,
         metric_arg: f32,
     ) -> Result<Self, BruteForceError> {
-        let mut index: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
-        // SAFETY: index is a valid pointer to a null cuvsIndex_t.
-        let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut index) };
+        let mut handle: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
+        // SAFETY: handle is a valid pointer to a null cuvsIndex_t.
+        let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut handle) };
         check_cuvs(status)?;
+
+        // Wrap immediately so Drop cleans up if build fails.
+        let idx = Self {
+            handle,
+            _dataset: PhantomData,
+            _not_send: PhantomData,
+        };
 
         // SAFETY:
         // - res.handle() is a valid cuvsResources_t.
         // - dataset is a valid DLManagedTensor on the stack.
-        // - index was successfully created above.
+        // - idx.handle was successfully created above.
         let status = unsafe {
             ffi::cuvsBruteForceBuild(
                 res.handle(),
-                dataset.as_mut_ptr(),
+                dataset.as_ptr(),
                 metric,
                 metric_arg,
-                index,
+                idx.handle,
             )
         };
         check_cuvs(status)?;
 
-        Ok(Self {
-            handle: index,
-            _dataset: PhantomData,
-            _not_send: PhantomData,
-        })
+        Ok(idx)
     }
 
     /// Search the index for nearest neighbors.
     ///
     /// `res` is only used for the duration of this call.
-    /// `queries`, `neighbors`, and `distances` are borrowed for the call —
-    /// the C function reads queries and writes results into the pre-allocated
-    /// `neighbors` and `distances` buffers.
+    /// `queries` is read-only input; the C function writes results into the
+    /// pre-allocated `neighbors` and `distances` buffers.
     pub fn search(
         &self,
         res: &Resources,
-        queries: &mut BorrowedDLTensor<'_>,
-        neighbors: &mut BorrowedDLTensor<'_>,
-        distances: &mut BorrowedDLTensor<'_>,
+        queries: &BorrowedDLTensor<'_>,
+        neighbors: &MutBorrowedDLTensor<'_>,
+        distances: &MutBorrowedDLTensor<'_>,
     ) -> Result<(), BruteForceError> {
         let no_filter = ffi::cuvsFilter {
             addr: 0,
@@ -103,9 +105,9 @@ impl<'d> Index<'d> {
             ffi::cuvsBruteForceSearch(
                 res.handle(),
                 self.handle,
-                queries.as_mut_ptr(),
-                neighbors.as_mut_ptr(),
-                distances.as_mut_ptr(),
+                queries.as_ptr(),
+                neighbors.as_ptr(),
+                distances.as_ptr(),
                 no_filter,
             )
         };
@@ -129,28 +131,32 @@ impl<'d> Index<'d> {
     /// The returned index does not borrow any external dataset, so the
     /// lifetime is `'static`.
     pub fn deserialize(res: &Resources, path: impl AsRef<Path>) -> Result<Index<'static>, BruteForceError> {
-        let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())
-?;
-        let mut index: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
-        let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut index) };
+        let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
+
+        let mut handle: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
+        let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut handle) };
         check_cuvs(status)?;
 
-        // SAFETY: res is valid; index was just created; c_path is a valid C string.
-        let status =
-            unsafe { ffi::cuvsBruteForceDeserialize(res.handle(), c_path.as_ptr(), index) };
-        check_cuvs(status)?;
-
-        Ok(Index {
-            handle: index,
+        // Wrap immediately so Drop cleans up if deserialize fails.
+        let idx = Index {
+            handle,
             _dataset: PhantomData,
             _not_send: PhantomData,
-        })
+        };
+
+        // SAFETY: res is valid; idx.handle was just created; c_path is a valid C string.
+        let status =
+            unsafe { ffi::cuvsBruteForceDeserialize(res.handle(), c_path.as_ptr(), idx.handle) };
+        check_cuvs(status)?;
+
+        Ok(idx)
     }
 }
 
 #[cfg(all(test, feature = "torch"))]
 mod tests {
     use super::*;
+    use crate::dlpack::MutBorrowedDLTensor;
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 256;
@@ -169,24 +175,24 @@ mod tests {
 
         let res = Resources::new().unwrap();
 
-        let mut dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::from(&dataset);
         let index = Index::build(
             &res,
-            &mut dataset_dl,
+            &dataset_dl,
             ffi::cuvsDistanceType::L2Expanded,
             0.0,
         )
         .unwrap();
 
-        let mut queries_dl = BorrowedDLTensor::from(&queries);
-        let mut neighbors_dl = BorrowedDLTensor::from(&neighbors);
-        let mut distances_dl = BorrowedDLTensor::from(&distances);
+        let queries_dl = BorrowedDLTensor::from(&queries);
+        let neighbors_dl = MutBorrowedDLTensor::from(&neighbors);
+        let distances_dl = MutBorrowedDLTensor::from(&distances);
         index
             .search(
                 &res,
-                &mut queries_dl,
-                &mut neighbors_dl,
-                &mut distances_dl,
+                &queries_dl,
+                &neighbors_dl,
+                &distances_dl,
             )
             .unwrap();
 
