@@ -52,13 +52,12 @@ impl CompressionParams {
         vq_kmeans_trainset_fraction: Option<f64>,
         pq_kmeans_trainset_fraction: Option<f64>,
     ) -> Result<Self, CagraError> {
-        if let Some(bits) = pq_bits {
-            if !(4..=16).contains(&bits) {
+        if let Some(bits) = pq_bits
+            && !(4..=16).contains(&bits) {
                 return Err(CagraError::Validation(format!(
                     "pq_bits must be within [4, 16], got {bits}"
                 )));
             }
-        }
 
         let mut handle = ptr::null_mut();
         check_cuvs(unsafe { ffi::cuvsCagraCompressionParamsCreate(&mut handle) })?;
@@ -143,29 +142,26 @@ impl IndexParams {
         nn_descent_niter: Option<usize>,
         compression: Option<CompressionParams>,
     ) -> Result<Self, CagraError> {
-        if let Some(d) = graph_degree {
-            if d == 0 {
+        if let Some(d) = graph_degree
+            && d == 0 {
                 return Err(CagraError::Validation("graph_degree must be > 0".into()));
             }
-        }
 
-        if let (Some(inter), Some(graph)) = (intermediate_graph_degree, graph_degree) {
-            if inter < graph {
+        if let (Some(inter), Some(graph)) = (intermediate_graph_degree, graph_degree)
+            && inter < graph {
                 return Err(CagraError::Validation(format!(
                     "intermediate_graph_degree ({inter}) must be >= graph_degree ({graph})"
                 )));
             }
-        }
 
-        if let Some(n) = nn_descent_niter {
-            if n == 0 {
+        if let Some(n) = nn_descent_niter
+            && n == 0 {
                 return Err(CagraError::Validation(
                     "nn_descent_niter must be > 0".into(),
                 ));
             }
-        }
 
-        let metric_supports_compression = metric.map_or(true, |v| v == DistanceType::L2Expanded);
+        let metric_supports_compression = metric.is_none_or(|v| v == DistanceType::L2Expanded);
         if compression.is_some() && !metric_supports_compression {
             return Err(CagraError::Validation(
                 "VPQ compression is only supported with L2Expanded distance metric".into(),
@@ -316,45 +312,40 @@ impl SearchParams {
         let effective_algo = algo.unwrap_or(SearchAlgo::SingleCta);
         let effective_hashmap_mode = hashmap_mode.unwrap_or(HashMode::Hash);
 
-        if let Some(n) = itopk_size {
-            if effective_algo == SearchAlgo::SingleCta && n > 512 {
+        if let Some(n) = itopk_size
+            && effective_algo == SearchAlgo::SingleCta && n > 512 {
                 return Err(CagraError::Validation(format!(
                     "itopk_size cannot be larger than 512 for SingleCta, got {n}"
                 )));
             }
-        }
 
-        if let Some(n) = team_size {
-            if !matches!(n, 0 | 8 | 16 | 32) {
+        if let Some(n) = team_size
+            && !matches!(n, 0 | 8 | 16 | 32) {
                 return Err(CagraError::Validation(format!(
                     "team_size must be 0 (auto), 8, 16, or 32, got {n}"
                 )));
             }
-        }
 
-        if let Some(n) = thread_block_size {
-            if !matches!(n, 0 | 64 | 128 | 256 | 512 | 1024) {
+        if let Some(n) = thread_block_size
+            && !matches!(n, 0 | 64 | 128 | 256 | 512 | 1024) {
                 return Err(CagraError::Validation(format!(
                     "thread_block_size must be 0, 64, 128, 256, 512, or 1024, got {n}"
                 )));
             }
-        }
 
-        if let Some(bitlen) = hashmap_min_bitlen {
-            if bitlen > 20 {
+        if let Some(bitlen) = hashmap_min_bitlen
+            && bitlen > 20 {
                 return Err(CagraError::Validation(format!(
                     "hashmap_min_bitlen must be <= 20, got {bitlen}"
                 )));
             }
-        }
 
-        if let Some(rate) = hashmap_max_fill_rate {
-            if rate < 0.1 || rate >= 0.9 {
+        if let Some(rate) = hashmap_max_fill_rate
+            && (!(0.1..0.9).contains(&rate)) {
                 return Err(CagraError::Validation(format!(
                     "hashmap_max_fill_rate must be in [0.1, 0.9), got {rate}"
                 )));
             }
-        }
 
         if effective_algo == SearchAlgo::MultiCta && effective_hashmap_mode == HashMode::Small {
             return Err(CagraError::Validation(

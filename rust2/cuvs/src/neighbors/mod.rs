@@ -7,3 +7,4 @@
 
 pub mod brute_force;
 pub mod cagra;
+pub mod filters;

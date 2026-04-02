@@ -10,11 +10,20 @@ use std::path::Path;
 
 use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
 use crate::error::check_cuvs;
+use crate::neighbors::filters::{Bitset, Filter};
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
 use super::params::{ExtendParams, IndexParams, SearchParams};
 use super::CagraError;
+
+/// Optional row filter applied during CAGRA search.
+pub enum SearchFilter<'a> {
+    /// Search without filtering.
+    None,
+    /// Reuse one row-level bitset for every query.
+    Bitset(Filter<'a, Bitset>),
+}
 
 /// A CAGRA approximate nearest neighbor index.
 ///
@@ -79,10 +88,14 @@ impl Index {
         queries: &BorrowedDLTensor<'_>,
         neighbors: &MutBorrowedDLTensor<'_>,
         distances: &MutBorrowedDLTensor<'_>,
+        filter: &SearchFilter<'_>,
     ) -> Result<(), CagraError> {
-        let no_filter = ffi::cuvsFilter {
-            addr: 0,
-            type_: ffi::cuvsFilterType::NO_FILTER,
+        let filter = match filter {
+            SearchFilter::None => ffi::cuvsFilter {
+                addr: 0,
+                type_: ffi::cuvsFilterType::NO_FILTER,
+            },
+            SearchFilter::Bitset(filter) => filter.as_cuvs_filter(),
         };
 
         let status = unsafe {
@@ -93,7 +106,7 @@ impl Index {
                 queries.as_ptr(),
                 neighbors.as_ptr(),
                 distances.as_ptr(),
-                no_filter,
+                filter,
             )
         };
         check_cuvs(status)?;
@@ -226,6 +239,7 @@ mod tests {
     use super::*;
     use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
     use crate::neighbors::cagra::{ExtendParams, GraphBuildAlgo, IndexParams, SearchParams};
+    use crate::neighbors::filters::{Bitset, Filter};
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 256;
@@ -256,13 +270,46 @@ mod tests {
                 &queries_dl,
                 &neighbors_dl,
                 &distances_dl,
+                &SearchFilter::None,
             )
             .unwrap();
 
-        let neighbors_cpu = neighbors.to(tch::Device::Cpu);
         let n_elements = (N_QUERIES * K) as usize;
         let mut buf = vec![0i64; n_elements];
-        neighbors_cpu.copy_data(&mut buf, n_elements);
+        neighbors.copy_data(&mut buf, n_elements);
+        buf
+    }
+
+    fn search_neighbor_indices_with_filter(
+        index: &Index,
+        res: &Resources,
+        search_params: &SearchParams,
+        queries: &tch::Tensor,
+        filter: &SearchFilter<'_>,
+    ) -> Vec<i64> {
+        let neighbors =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
+        let distances =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
+
+        let queries_dl = BorrowedDLTensor::from(queries);
+        let neighbors_dl = MutBorrowedDLTensor::from(&neighbors);
+        let distances_dl = MutBorrowedDLTensor::from(&distances);
+
+        index
+            .search(
+                res,
+                search_params,
+                &queries_dl,
+                &neighbors_dl,
+                &distances_dl,
+                filter,
+            )
+            .unwrap();
+
+        let n_elements = (N_QUERIES * K) as usize;
+        let mut buf = vec![0i64; n_elements];
+        neighbors.copy_data(&mut buf, n_elements);
         buf
     }
 
@@ -270,6 +317,19 @@ mod tests {
         for &idx in indices {
             assert!(idx >= 0 && idx < upper_bound, "neighbor index {idx} out of range");
         }
+    }
+
+    // Build a packed bitset where the first `allowed_rows` dataset rows are
+    // marked as allowed (`1`) and all remaining rows are filtered out (`0`).
+    fn bitset_words_with_allowed_prefix(allowed_rows: i64, total_rows: i64) -> Vec<i32> {
+        let n_words = ((total_rows + 31) / 32) as usize;
+        let mut words = vec![0u32; n_words];
+        for row in 0..allowed_rows {
+            let word = (row / 32) as usize;
+            let bit = (row % 32) as u32;
+            words[word] |= 1u32 << bit;
+        }
+        words.into_iter().map(|word| word as i32).collect()
     }
 
     fn temp_index_path(name: &str) -> PathBuf {
@@ -434,5 +494,32 @@ mod tests {
             let buf = search_neighbor_indices(&index, &res, &search_params, &queries);
             assert_neighbor_indices_in_range(&buf, N_ROWS);
         }
+    }
+
+    #[test]
+    fn search_with_bitset_filter_excludes_filtered_rows() {
+        let res = Resources::new().unwrap();
+
+        let dataset =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let params = IndexParams::builder().build().unwrap();
+        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+
+        let queries =
+            tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let search_params = SearchParams::builder().build().unwrap();
+
+        let allowed_rows = N_ROWS / 2;
+        let bitset_words = bitset_words_with_allowed_prefix(allowed_rows, N_ROWS);
+        let bitset = tch::Tensor::from_slice(&bitset_words).to(tch::Device::Cuda(0));
+        let buf = search_neighbor_indices_with_filter(
+            &index,
+            &res,
+            &search_params,
+            &queries,
+            &SearchFilter::Bitset(Filter::<Bitset>::new(&bitset).unwrap()),
+        );
+        assert_neighbor_indices_in_range(&buf, allowed_rows);
     }
 }
