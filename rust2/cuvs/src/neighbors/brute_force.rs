@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 
 use crate::distance::DistanceType;
-use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
+use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi};
 use crate::error::{LibraryError, check_cuvs};
 use crate::neighbors::filters::{Bitmap, Bitset, Filter};
 use crate::resources::Resources;
@@ -55,33 +55,27 @@ impl<'d> Index<'d> {
     /// Build a brute force index from a dataset tensor.
     ///
     /// The returned index borrows `dataset` — it must outlive the index.
-    /// `res` is only used for the duration of this call.
-    pub fn build(
+    pub fn build<T: AsDLTensor + ?Sized>(
         res: &Resources,
-        dataset: &BorrowedDLTensor<'d>,
+        dataset: &'d T,
         metric: DistanceType,
         metric_arg: f32,
     ) -> Result<Self, BruteForceError> {
         let mut handle: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
-        // SAFETY: handle is a valid pointer to a null cuvsIndex_t.
         let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut handle) };
         check_cuvs(status)?;
 
-        // Wrap immediately so Drop cleans up if build fails.
+        // Wrap early so Drop cleans up if build fails.
         let idx = Self {
             handle,
             _dataset: PhantomData,
             _not_send: PhantomData,
         };
 
-        // SAFETY:
-        // - res.handle() is a valid cuvsResources_t.
-        // - dataset is a valid DLManagedTensor on the stack.
-        // - idx.handle was successfully created above.
         let status = unsafe {
             ffi::cuvsBruteForceBuild(
                 res.handle(),
-                dataset.as_ptr(),
+                dataset.ffi_ptr(),
                 metric.into(),
                 metric_arg,
                 idx.handle,
@@ -94,15 +88,14 @@ impl<'d> Index<'d> {
 
     /// Search the index for nearest neighbors.
     ///
-    /// `res` is only used for the duration of this call.
-    /// `queries` is read-only input; the C function writes results into the
-    /// pre-allocated `neighbors` and `distances` buffers.
+    /// The C function writes results into the pre-allocated `neighbors` and
+    /// `distances` buffers.
     pub fn search(
         &self,
         res: &Resources,
-        queries: &BorrowedDLTensor<'_>,
-        neighbors: &MutBorrowedDLTensor<'_>,
-        distances: &MutBorrowedDLTensor<'_>,
+        queries: &impl AsDLTensor,
+        neighbors: &impl AsMutDLTensor,
+        distances: &impl AsMutDLTensor,
         filter: &SearchFilter<'_>,
     ) -> Result<(), BruteForceError> {
         let filter = match filter {
@@ -118,9 +111,9 @@ impl<'d> Index<'d> {
             ffi::cuvsBruteForceSearch(
                 res.handle(),
                 self.handle,
-                queries.as_ptr(),
-                neighbors.as_ptr(),
-                distances.as_ptr(),
+                queries.ffi_ptr(),
+                neighbors.ffi_ptr(),
+                distances.ffi_ptr(),
                 filter,
             )
         };
@@ -135,7 +128,6 @@ impl<'d> Index<'d> {
         path: impl AsRef<Path>,
     ) -> Result<(), BruteForceError> {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
-        // SAFETY: res and self.handle are valid; c_path is a valid C string.
         let status =
             unsafe { ffi::cuvsBruteForceSerialize(res.handle(), c_path.as_ptr(), self.handle) };
         check_cuvs(status)?;
@@ -156,14 +148,13 @@ impl<'d> Index<'d> {
         let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut handle) };
         check_cuvs(status)?;
 
-        // Wrap immediately so Drop cleans up if deserialize fails.
+        // Wrap early so Drop cleans up if deserialize fails.
         let idx = Index {
             handle,
             _dataset: PhantomData,
             _not_send: PhantomData,
         };
 
-        // SAFETY: res is valid; idx.handle was just created; c_path is a valid C string.
         let status =
             unsafe { ffi::cuvsBruteForceDeserialize(res.handle(), c_path.as_ptr(), idx.handle) };
         check_cuvs(status)?;
@@ -174,7 +165,6 @@ impl<'d> Index<'d> {
 
 impl Drop for Index<'_> {
     fn drop(&mut self) {
-        // SAFETY: self.handle was successfully created by cuvsIndexCreate.
         let _ = unsafe { ffi::cuvsBruteForceIndexDestroy(self.handle) };
     }
 }
@@ -183,7 +173,8 @@ impl Drop for Index<'_> {
 mod tests {
     use super::*;
     use crate::distance::DistanceType;
-    use crate::dlpack::MutBorrowedDLTensor;
+    use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
+    use crate::neighbors::cagra;
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 256;
@@ -222,12 +213,12 @@ mod tests {
 
         let res = Resources::new().unwrap();
 
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded, 0.0).unwrap();
 
-        let queries_dl = BorrowedDLTensor::from(&queries);
-        let neighbors_dl = MutBorrowedDLTensor::from(&neighbors);
-        let distances_dl = MutBorrowedDLTensor::from(&distances);
+        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
         index
             .search(
                 &res,
@@ -258,6 +249,45 @@ mod tests {
     }
 
     #[test]
+    fn build_from_returned_cagra_dataset_view() {
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let queries =
+            tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let neighbors =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
+        let distances =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
+
+        let res = Resources::new().unwrap();
+
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let cagra_index =
+            cagra::Index::build(&res, &cagra::IndexParams::builder().build().unwrap(), &dataset_dl)
+                .unwrap();
+        let dataset_view = cagra_index.dataset().unwrap();
+
+        let index = Index::build(&res, &dataset_view, DistanceType::L2Expanded, 0.0).unwrap();
+
+        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        index
+            .search(
+                &res,
+                &queries_dl,
+                &neighbors_dl,
+                &distances_dl,
+                &SearchFilter::None,
+            )
+            .unwrap();
+
+        let indices = extract_neighbor_indices(&neighbors, N_QUERIES, K);
+        for &idx in &indices {
+            assert!(idx >= 0 && idx < N_ROWS, "neighbor index {idx} out of range");
+        }
+    }
+
+    #[test]
     fn search_with_bitset_filter_excludes_filtered_rows() {
         let dataset = exact_filter_dataset();
         let queries = exact_filter_queries();
@@ -266,12 +296,12 @@ mod tests {
         let bitset = tch::Tensor::from_slice(&[0b0110i32]).to(tch::Device::Cuda(0));
 
         let res = Resources::new().unwrap();
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded, 0.0).unwrap();
 
-        let queries_dl = BorrowedDLTensor::from(&queries);
-        let neighbors_dl = MutBorrowedDLTensor::from(&neighbors);
-        let distances_dl = MutBorrowedDLTensor::from(&distances);
+        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
         index
             .search(
                 &res,
@@ -295,12 +325,12 @@ mod tests {
         let bitmap = tch::Tensor::from_slice(&[0b0010_0100i32]).to(tch::Device::Cuda(0));
 
         let res = Resources::new().unwrap();
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded, 0.0).unwrap();
 
-        let queries_dl = BorrowedDLTensor::from(&queries);
-        let neighbors_dl = MutBorrowedDLTensor::from(&neighbors);
-        let distances_dl = MutBorrowedDLTensor::from(&distances);
+        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
         index
             .search(
                 &res,

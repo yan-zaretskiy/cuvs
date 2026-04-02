@@ -254,6 +254,19 @@ impl fmt::Debug for IndexParams {
 
 impl Drop for IndexParams {
     fn drop(&mut self) {
+        // Ownership contract with the C layer:
+        // - `cuvsCagraIndexParamsCreate()` installs the default IVF-PQ
+        //   `graph_build_params` allocation.
+        // - `cuvsCagraIndexParamsDestroy()` frees whatever
+        //   `graph_build_params` currently points to based on `build_algo`.
+        // - Rust swaps that field between the original C-owned IVF-PQ payload,
+        //   a Rust-owned ACE payload, and `null` for algorithms that do not use
+        //   graph-build params.
+        //
+        // Before delegating to the C destructor we therefore restore the
+        // original C-owned IVF-PQ pointer whenever Rust has either taken
+        // ownership of ACE params or nulled the field out, so the C side frees
+        // the correct allocation exactly once.
         unsafe {
             if let Some(ace_params) = self.ace_graph_build_params.take() {
                 let _ = ffi::cuvsAceParamsDestroy(ace_params);
@@ -309,8 +322,13 @@ impl SearchParams {
         persistent_lifetime: Option<f32>,
         persistent_device_usage: Option<f32>,
     ) -> Result<Self, CagraError> {
-        let effective_algo = algo.unwrap_or(SearchAlgo::SingleCta);
-        let effective_hashmap_mode = hashmap_mode.unwrap_or(HashMode::Hash);
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsCagraSearchParamsCreate(&mut handle) })?;
+        let params = Self { handle };
+
+        let effective_algo = algo.unwrap_or(unsafe { (*params.handle).algo.into() });
+        let effective_hashmap_mode =
+            hashmap_mode.unwrap_or(unsafe { (*params.handle).hashmap_mode.into() });
 
         if let Some(n) = itopk_size
             && effective_algo == SearchAlgo::SingleCta && n > 512 {
@@ -352,11 +370,6 @@ impl SearchParams {
                 "`small_hash` is not available when 'search_mode' is \"multi-cta\"".into(),
             ));
         }
-
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsCagraSearchParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
         unsafe {
             if let Some(v) = max_queries {
                 (*params.handle).max_queries = v;

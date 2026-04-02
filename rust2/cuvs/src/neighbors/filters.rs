@@ -7,11 +7,12 @@
 
 use std::marker::PhantomData;
 
-use crate::dlpack::BorrowedDLTensor;
+use crate::dlpack::{BorrowedDLTensor, DLPackError};
 use crate::ffi;
 
 /// Error returned when constructing an invalid filter payload.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FilterError {
     /// The filter tensor must be a 1-D vector of packed 32-bit words.
     #[error("filter must be a 1-D tensor")]
@@ -22,6 +23,15 @@ pub enum FilterError {
     /// The bitset tensor must use 32-bit words.
     #[error("filter must use 32-bit words (`u32` or reinterpretable `i32`)")]
     InvalidDType,
+    /// The source tensor could not be converted to a DLPack view.
+    #[error(transparent)]
+    Conversion(#[from] DLPackError),
+}
+
+impl From<std::convert::Infallible> for FilterError {
+    fn from(x: std::convert::Infallible) -> Self {
+        match x {}
+    }
 }
 
 /// Marker for a row-level bitset filter.
@@ -63,11 +73,12 @@ impl<'a, K: FilterKind> Filter<'a, K> {
     /// [`BorrowedDLTensor`].
     pub fn new<T>(filter_words: &'a T) -> Result<Self, FilterError>
     where
-        BorrowedDLTensor<'a>: From<&'a T>,
+        BorrowedDLTensor<'a>: TryFrom<&'a T>,
+        FilterError: From<<BorrowedDLTensor<'a> as TryFrom<&'a T>>::Error>,
     {
-        let tensor = BorrowedDLTensor::from(filter_words);
+        let tensor = BorrowedDLTensor::try_from(filter_words)?;
         let ptr = tensor.as_ptr();
-        let dl = unsafe { &(*ptr).dl_tensor };
+        let dl = unsafe { &mut (*ptr).dl_tensor };
 
         if dl.ndim != 1 {
             return Err(FilterError::InvalidRank);
@@ -90,6 +101,16 @@ impl<'a, K: FilterKind> Filter<'a, K> {
             return Err(FilterError::InvalidDType);
         }
 
+        // Retag the wrapper-owned DLPack metadata once at construction time so
+        // all later users observe the same `u32` bitset representation.
+        if dl.dtype.code == ffi::DLDataTypeCode::kDLInt as u8 {
+            dl.dtype = ffi::DLDataType {
+                code: ffi::DLDataTypeCode::kDLUInt as u8,
+                bits: 32,
+                lanes: 1,
+            };
+        }
+
         Ok(Self {
             tensor,
             _kind: PhantomData,
@@ -98,19 +119,27 @@ impl<'a, K: FilterKind> Filter<'a, K> {
 
     pub(crate) fn as_cuvs_filter(&self) -> ffi::cuvsFilter {
         let ptr = self.tensor.as_ptr();
-        let dl = unsafe { &mut (*ptr).dl_tensor };
-
-        if dl.dtype.code == ffi::DLDataTypeCode::kDLInt as u8 && dl.dtype.bits == 32 {
-            dl.dtype = ffi::DLDataType {
-                code: ffi::DLDataTypeCode::kDLUInt as u8,
-                bits: 32,
-                lanes: 1,
-            };
-        }
 
         ffi::cuvsFilter {
             addr: ptr as usize,
             type_: K::FILTER_TYPE,
         }
+    }
+}
+
+#[cfg(all(test, feature = "torch"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_retags_i32_metadata_at_construction() {
+        let bitset = tch::Tensor::from_slice(&[0b0110i32]).to(tch::Device::Cuda(0));
+        let filter = Filter::<Bitset>::new(&bitset).unwrap();
+        let dl = unsafe { &(*filter.tensor.as_ptr()).dl_tensor };
+
+        assert_eq!(dl.dtype.code, ffi::DLDataTypeCode::kDLUInt as u8);
+        assert_eq!(dl.dtype.bits, 32);
+        assert_eq!(dl.dtype.lanes, 1);
+        assert_eq!(filter.as_cuvs_filter().type_, ffi::cuvsFilterType::BITSET);
     }
 }

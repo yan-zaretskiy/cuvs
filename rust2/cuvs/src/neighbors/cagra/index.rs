@@ -8,7 +8,8 @@
 use std::ffi::CString;
 use std::path::Path;
 
-use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
+use crate::distance::DistanceType;
+use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi, ReturnedDLTensor};
 use crate::error::check_cuvs;
 use crate::neighbors::filters::{Bitset, Filter};
 use crate::resources::Resources;
@@ -50,12 +51,34 @@ impl Index {
     pub fn build(
         res: &Resources,
         params: &IndexParams,
-        dataset: &BorrowedDLTensor<'_>,
+        dataset: &impl AsDLTensor,
     ) -> Result<Self, CagraError> {
         let idx = Self::create_handle()?;
 
         let status = unsafe {
-            ffi::cuvsCagraBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
+            ffi::cuvsCagraBuild(res.handle(), params.handle(), dataset.ffi_ptr(), idx.handle)
+        };
+        check_cuvs(status)?;
+        Ok(idx)
+    }
+
+    /// Construct a CAGRA index from an existing graph and dataset.
+    pub fn from_args(
+        res: &Resources,
+        metric: DistanceType,
+        graph: &impl AsDLTensor,
+        dataset: &impl AsDLTensor,
+    ) -> Result<Self, CagraError> {
+        let idx = Self::create_handle()?;
+
+        let status = unsafe {
+            ffi::cuvsCagraIndexFromArgs(
+                res.handle(),
+                metric.into(),
+                graph.ffi_ptr(),
+                dataset.ffi_ptr(),
+                idx.handle,
+            )
         };
         check_cuvs(status)?;
         Ok(idx)
@@ -79,15 +102,15 @@ impl Index {
 
     /// Search the index for approximate nearest neighbors.
     ///
-    /// `queries` is a read-only input; the C function writes results into the
-    /// pre-allocated `neighbors` and `distances` buffers.
+    /// The C function writes results into the pre-allocated `neighbors` and
+    /// `distances` buffers.
     pub fn search(
         &self,
         res: &Resources,
         params: &SearchParams,
-        queries: &BorrowedDLTensor<'_>,
-        neighbors: &MutBorrowedDLTensor<'_>,
-        distances: &MutBorrowedDLTensor<'_>,
+        queries: &impl AsDLTensor,
+        neighbors: &impl AsMutDLTensor,
+        distances: &impl AsMutDLTensor,
         filter: &SearchFilter<'_>,
     ) -> Result<(), CagraError> {
         let filter = match filter {
@@ -103,9 +126,9 @@ impl Index {
                 res.handle(),
                 params.handle(),
                 self.handle,
-                queries.as_ptr(),
-                neighbors.as_ptr(),
-                distances.as_ptr(),
+                queries.ffi_ptr(),
+                neighbors.ffi_ptr(),
+                distances.ffi_ptr(),
                 filter,
             )
         };
@@ -125,13 +148,13 @@ impl Index {
         &mut self,
         res: &Resources,
         params: &ExtendParams,
-        additional_dataset: &BorrowedDLTensor<'_>,
+        additional_dataset: &impl AsDLTensor,
     ) -> Result<(), CagraError> {
         let status = unsafe {
             ffi::cuvsCagraExtend(
                 res.handle(),
                 params.handle(),
-                additional_dataset.as_ptr(),
+                additional_dataset.ffi_ptr(),
                 self.handle,
             )
         };
@@ -206,6 +229,20 @@ impl Index {
         Ok(degree)
     }
 
+    /// Return a non-owning view of the dataset attached to the index.
+    pub fn dataset(&self) -> Result<ReturnedDLTensor<'_>, CagraError> {
+        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
+            ffi::cuvsCagraIndexGetDataset(self.handle, ptr)
+        })?)
+    }
+
+    /// Return a non-owning view of the graph stored inside the index.
+    pub fn graph(&self) -> Result<ReturnedDLTensor<'_>, CagraError> {
+        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
+            ffi::cuvsCagraIndexGetGraph(self.handle, ptr)
+        })?)
+    }
+
     // -----------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------
@@ -237,6 +274,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::distance::DistanceType;
     use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
     use crate::neighbors::cagra::{ExtendParams, GraphBuildAlgo, IndexParams, SearchParams};
     use crate::neighbors::filters::{Bitset, Filter};
@@ -259,9 +297,9 @@ mod tests {
         let distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let queries_dl = BorrowedDLTensor::from(queries);
-        let neighbors_dl = MutBorrowedDLTensor::from(&neighbors);
-        let distances_dl = MutBorrowedDLTensor::from(&distances);
+        let queries_dl = BorrowedDLTensor::try_from(queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
 
         index
             .search(
@@ -292,9 +330,9 @@ mod tests {
         let distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let queries_dl = BorrowedDLTensor::from(queries);
-        let neighbors_dl = MutBorrowedDLTensor::from(&neighbors);
-        let distances_dl = MutBorrowedDLTensor::from(&distances);
+        let queries_dl = BorrowedDLTensor::try_from(queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
 
         index
             .search(
@@ -350,7 +388,7 @@ mod tests {
         let dataset =
             tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
@@ -378,7 +416,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
         assert_eq!(index.dims().unwrap(), DIM);
     }
@@ -396,9 +434,64 @@ mod tests {
             .build()
             .unwrap();
 
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
         assert_eq!(index.dims().unwrap(), DIM);
+    }
+
+    #[test]
+    fn dataset_and_graph_views_expose_expected_metadata() {
+        let res = Resources::new().unwrap();
+        let dataset =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let params = IndexParams::builder().build().unwrap();
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+
+        let dataset_view = index.dataset().unwrap();
+        assert_eq!(dataset_view.shape(), &[N_ROWS, DIM]);
+        let dataset_dtype = dataset_view.dtype();
+        assert_eq!(dataset_dtype.code, ffi::DLDataTypeCode::kDLFloat as u8);
+        assert_eq!(dataset_dtype.bits, 32);
+        assert_eq!(dataset_dtype.lanes, 1);
+
+        let graph_view = index.graph().unwrap();
+        assert_eq!(graph_view.shape(), &[N_ROWS, index.graph_degree().unwrap()]);
+        let graph_dtype = graph_view.dtype();
+        assert_eq!(graph_dtype.code, ffi::DLDataTypeCode::kDLUInt as u8);
+        assert_eq!(graph_dtype.bits, 32);
+        assert_eq!(graph_dtype.lanes, 1);
+    }
+
+    #[test]
+    fn from_args_rebuilds_index_from_graph_and_dataset_views() {
+        let res = Resources::new().unwrap();
+        let dataset =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let params = IndexParams::builder().build().unwrap();
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+
+        let dataset_view = index.dataset().unwrap();
+        let graph_view = index.graph().unwrap();
+
+        let rebuilt = Index::from_args(
+            &res,
+            DistanceType::L2Expanded,
+            &graph_view,
+            &dataset_view,
+        )
+        .unwrap();
+
+        assert_eq!(rebuilt.dims().unwrap(), DIM);
+        assert_eq!(rebuilt.size().unwrap(), N_ROWS);
+        assert_eq!(rebuilt.graph_degree().unwrap(), index.graph_degree().unwrap());
+
+        let queries =
+            tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let search_params = SearchParams::builder().build().unwrap();
+        let buf = search_neighbor_indices(&rebuilt, &res, &search_params, &queries);
+        assert_neighbor_indices_in_range(&buf, N_ROWS);
     }
 
     #[test]
@@ -409,7 +502,7 @@ mod tests {
         let index = {
             let dataset =
                 tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-            let dataset_dl = BorrowedDLTensor::from(&dataset);
+            let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
             Index::build(&res, &params, &dataset_dl).unwrap()
         };
 
@@ -427,7 +520,7 @@ mod tests {
         let dataset =
             tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let path = temp_index_path("cagra-roundtrip");
@@ -454,13 +547,13 @@ mod tests {
         let dataset =
             tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let mut index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let additional_dataset =
             tch::Tensor::randn([EXTRA_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let extend_params = ExtendParams::builder().max_chunk_size(32).build().unwrap();
-        let additional_dataset_dl = BorrowedDLTensor::from(&additional_dataset);
+        let additional_dataset_dl = BorrowedDLTensor::try_from(&additional_dataset).unwrap();
 
         index
             .extend(&res, &extend_params, &additional_dataset_dl)
@@ -483,7 +576,7 @@ mod tests {
         let dataset =
             tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let search_params = SearchParams::builder().itopk_size(64).build().unwrap();
@@ -503,7 +596,7 @@ mod tests {
         let dataset =
             tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = BorrowedDLTensor::from(&dataset);
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let queries =
