@@ -26,6 +26,18 @@ pub enum SearchFilter<'a> {
     Bitset(Filter<'a, Bitset>),
 }
 
+impl SearchFilter<'_> {
+    fn to_ffi(&self) -> ffi::cuvsFilter {
+        match self {
+            Self::None => ffi::cuvsFilter {
+                addr: 0,
+                type_: ffi::cuvsFilterType::NO_FILTER,
+            },
+            Self::Bitset(f) => f.as_cuvs_filter(),
+        }
+    }
+}
+
 /// A CAGRA approximate nearest neighbor index.
 ///
 /// CAGRA builds a k-NN graph on the GPU and prunes it to the requested
@@ -113,14 +125,6 @@ impl Index {
         distances: &impl AsMutDLTensor,
         filter: &SearchFilter<'_>,
     ) -> Result<(), CagraError> {
-        let filter = match filter {
-            SearchFilter::None => ffi::cuvsFilter {
-                addr: 0,
-                type_: ffi::cuvsFilterType::NO_FILTER,
-            },
-            SearchFilter::Bitset(filter) => filter.as_cuvs_filter(),
-        };
-
         let status = unsafe {
             ffi::cuvsCagraSearch(
                 res.handle(),
@@ -129,7 +133,7 @@ impl Index {
                 queries.ffi_ptr(),
                 neighbors.ffi_ptr(),
                 distances.ffi_ptr(),
-                filter,
+                filter.to_ffi(),
             )
         };
         check_cuvs(status)?;
@@ -160,6 +164,39 @@ impl Index {
         };
         check_cuvs(status)?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Merge
+    // -----------------------------------------------------------------
+
+    /// Merge multiple CAGRA indices into a new index.
+    ///
+    /// All input indices must share the same dtype and dimensionality.
+    /// The merged index is written into a freshly created output handle.
+    pub fn merge(
+        res: &Resources,
+        params: &IndexParams,
+        indices: &[&Index],
+        filter: &SearchFilter<'_>,
+    ) -> Result<Self, CagraError> {
+        let output = Self::create_handle()?;
+
+        let mut handles: Vec<ffi::cuvsCagraIndex_t> =
+            indices.iter().map(|idx| idx.handle).collect();
+
+        let status = unsafe {
+            ffi::cuvsCagraMerge(
+                res.handle(),
+                params.handle(),
+                handles.as_mut_ptr(),
+                handles.len(),
+                filter.to_ffi(),
+                output.handle,
+            )
+        };
+        check_cuvs(status)?;
+        Ok(output)
     }
 
     // -----------------------------------------------------------------
@@ -614,5 +651,39 @@ mod tests {
             &SearchFilter::Bitset(Filter::<Bitset>::new(&bitset).unwrap()),
         );
         assert_neighbor_indices_in_range(&buf, allowed_rows);
+    }
+
+    #[test]
+    fn merge_two_indices() {
+        let res = Resources::new().unwrap();
+        let params = IndexParams::builder().build().unwrap();
+
+        let dataset_a =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset_b =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+
+        let dl_a = BorrowedDLTensor::try_from(&dataset_a).unwrap();
+        let dl_b = BorrowedDLTensor::try_from(&dataset_b).unwrap();
+
+        let index_a = Index::build(&res, &params, &dl_a).unwrap();
+        let index_b = Index::build(&res, &params, &dl_b).unwrap();
+
+        let merged = Index::merge(
+            &res,
+            &params,
+            &[&index_a, &index_b],
+            &SearchFilter::None,
+        )
+        .unwrap();
+
+        assert_eq!(merged.dims().unwrap(), DIM);
+        assert_eq!(merged.size().unwrap(), N_ROWS * 2);
+
+        let queries =
+            tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let search_params = SearchParams::builder().build().unwrap();
+        let buf = search_neighbor_indices(&merged, &res, &search_params, &queries);
+        assert_neighbor_indices_in_range(&buf, N_ROWS * 2);
     }
 }

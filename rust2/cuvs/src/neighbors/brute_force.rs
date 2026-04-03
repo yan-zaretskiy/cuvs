@@ -40,6 +40,19 @@ pub enum SearchFilter<'a> {
     Bitmap(Filter<'a, Bitmap>),
 }
 
+impl SearchFilter<'_> {
+    fn to_ffi(&self) -> ffi::cuvsFilter {
+        match self {
+            Self::None => ffi::cuvsFilter {
+                addr: 0,
+                type_: ffi::cuvsFilterType::NO_FILTER,
+            },
+            Self::Bitset(f) => f.as_cuvs_filter(),
+            Self::Bitmap(f) => f.as_cuvs_filter(),
+        }
+    }
+}
+
 /// A brute force nearest neighbor index.
 ///
 /// The lifetime `'d` ties this index to the dataset tensor used to build it.
@@ -98,15 +111,6 @@ impl<'d> Index<'d> {
         distances: &impl AsMutDLTensor,
         filter: &SearchFilter<'_>,
     ) -> Result<(), BruteForceError> {
-        let filter = match filter {
-            SearchFilter::None => ffi::cuvsFilter {
-                addr: 0,
-                type_: ffi::cuvsFilterType::NO_FILTER,
-            },
-            SearchFilter::Bitset(filter) => filter.as_cuvs_filter(),
-            SearchFilter::Bitmap(filter) => filter.as_cuvs_filter(),
-        };
-
         let status = unsafe {
             ffi::cuvsBruteForceSearch(
                 res.handle(),
@@ -114,7 +118,7 @@ impl<'d> Index<'d> {
                 queries.ffi_ptr(),
                 neighbors.ffi_ptr(),
                 distances.ffi_ptr(),
-                filter,
+                filter.to_ffi(),
             )
         };
         check_cuvs(status)?;
