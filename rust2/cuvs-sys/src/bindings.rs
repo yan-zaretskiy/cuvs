@@ -1325,6 +1325,14 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     #[must_use]
+    #[doc = " @brief Replace the ACE build directory with a copied C-owned string.\n\n The params object duplicates the provided string and takes ownership of the\n duplicate. The caller retains ownership of `build_dir` and may free it after\n this function returns.\n\n @param[in] params ACE params to update\n @param[in] build_dir Non-null path string to copy into `params`\n @return cuvsError_t"]
+    pub fn cuvsAceParamsSetBuildDir(
+        params: cuvsAceParams_t,
+        build_dir: *const ::std::os::raw::c_char,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
     #[doc = " @brief De-allocate ACE params\n\n @param[in] params\n @return cuvsError_t"]
     pub fn cuvsAceParamsDestroy(params: cuvsAceParams_t) -> cuvsError_t;
 }

@@ -13,7 +13,9 @@ mod index;
 mod params;
 
 pub use index::Index;
-pub use params::{CompressionParams, ExtendParams, IndexParams, SearchParams};
+pub use params::{
+    AceParams, CompressionParams, ExtendParams, IndexParams, IvfPqGraphBuildParams, SearchParams,
+};
 
 use crate::error::LibraryError;
 use crate::ffi;
@@ -126,6 +128,44 @@ impl From<ffi::cuvsCagraHashMode> for HashMode {
             ffi::cuvsCagraHashMode::HASH => Self::Hash,
             ffi::cuvsCagraHashMode::SMALL => Self::Small,
             ffi::cuvsCagraHashMode::AUTO_HASH => Self::Auto,
+        }
+    }
+}
+
+/// Strategy for selecting CAGRA graph parameters from HNSW-like inputs.
+///
+/// Used with [`IndexParams::from_hnsw_params`].
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HnswHeuristicType {
+    /// Produce a graph with search performance similar to an HNSW graph.
+    SimilarSearchPerformance,
+    /// Produce a graph with the same binary size as the equivalent HNSW graph.
+    SameGraphFootprint,
+}
+
+impl From<HnswHeuristicType> for ffi::cuvsCagraHnswHeuristicType {
+    fn from(v: HnswHeuristicType) -> Self {
+        match v {
+            HnswHeuristicType::SimilarSearchPerformance => {
+                Self::CUVS_CAGRA_HEURISTIC_SIMILAR_SEARCH_PERFORMANCE
+            }
+            HnswHeuristicType::SameGraphFootprint => {
+                Self::CUVS_CAGRA_HEURISTIC_SAME_GRAPH_FOOTPRINT
+            }
+        }
+    }
+}
+
+impl From<ffi::cuvsCagraHnswHeuristicType> for HnswHeuristicType {
+    fn from(v: ffi::cuvsCagraHnswHeuristicType) -> Self {
+        match v {
+            ffi::cuvsCagraHnswHeuristicType::CUVS_CAGRA_HEURISTIC_SIMILAR_SEARCH_PERFORMANCE => {
+                Self::SimilarSearchPerformance
+            }
+            ffi::cuvsCagraHnswHeuristicType::CUVS_CAGRA_HEURISTIC_SAME_GRAPH_FOOTPRINT => {
+                Self::SameGraphFootprint
+            }
         }
     }
 }

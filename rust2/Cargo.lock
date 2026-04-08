@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "cuvs"
-version = "26.2.0"
+version = "26.6.0"
 dependencies = [
  "bon",
  "cuvs-sys",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "cuvs-sys"
-version = "26.2.0"
+version = "26.6.0"
 dependencies = [
  "bindgen",
  "cmake",

@@ -313,7 +313,7 @@ mod tests {
     use super::*;
     use crate::distance::DistanceType;
     use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
-    use crate::neighbors::cagra::{ExtendParams, GraphBuildAlgo, IndexParams, SearchParams};
+    use crate::neighbors::cagra::{ExtendParams, IndexParams, SearchParams};
     use crate::neighbors::filters::{Bitset, Filter};
     use crate::resources::Resources;
 
@@ -448,7 +448,6 @@ mod tests {
 
         let params = IndexParams::builder()
             .graph_degree(32)
-            .build_algo(GraphBuildAlgo::NnDescent)
             .nn_descent_niter(20)
             .build()
             .unwrap();

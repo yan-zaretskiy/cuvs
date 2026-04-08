@@ -3,23 +3,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use std::path::{Path, PathBuf};
 #[cfg(not(feature = "vendored"))]
 use std::process::Command;
-use std::path::Path;
-use std::path::PathBuf;
 
 use cmake_package::find_package;
-use cmake_package::{Error as CmakeError, VersionError};
+use cmake_package::{Error as CmakeError, Version, VersionError};
 use thiserror::Error;
 
 const CUVS_COMPONENT: &str = "c_api";
+const CUVS_C_API_TARGET: &str = "cuvs::c_api";
+const CUDA_TOOLKIT_TARGET: &str = "CUDA::toolkit";
+const DLPACK_TARGET: &str = "dlpack::dlpack";
 #[cfg(feature = "vendored")]
 const DEFAULT_CPP_SOURCE: &str = "../../cpp";
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct CuvsMetadata {
-    include_dir: String,
-    lib_dir: String,
+    include_dir: PathBuf,
+    bindgen_include_dirs: Vec<PathBuf>,
+    lib_dir: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -30,11 +33,14 @@ struct CuvsMetadata {
 #[derive(Debug, Error)]
 enum DiscoveryError {
     /// A cuVS library was found but with an incompatible version.
-    #[error("Found cuVS {found}, but cuvs-sys requires {required}.")]
+    #[error("Found cuVS {found}, but cuvs-sys requires exact version {required}.")]
     VersionMismatch {
         found: String,
         required: &'static str,
     },
+    /// cuVS did not report a package version that we can validate.
+    #[error("Found cuVS, but it did not report a parseable package version.")]
+    VersionUnavailable,
     /// CMake is not installed or too old.
     #[error("CMake is not installed or too old (3.19+ required). Install CMake and try again.")]
     CmakeUnavailable,
@@ -49,6 +55,96 @@ enum DiscoveryError {
          Or enable the 'vendored' feature to build from source."
     )]
     NotFound,
+    /// The discovered package did not export the expected target.
+    #[error("Found CMake package {package}, but target {target} was not exported.")]
+    MissingTarget {
+        package: &'static str,
+        target: &'static str,
+    },
+    /// No DLPack package was found.
+    #[error(
+        "Could not find DLPack CMake package.\n\
+         \n\
+         Install DLPack so that `find_package(dlpack)` succeeds."
+    )]
+    DlpackNotFound,
+    /// No CUDA Toolkit package was found.
+    #[error(
+        "Could not find CUDA Toolkit CMake package.\n\
+         \n\
+         Install CUDA Toolkit so that `find_package(CUDAToolkit)` succeeds."
+    )]
+    CudaToolkitNotFound,
+}
+
+fn requested_version() -> Version {
+    PACKAGE_VERSION
+        .try_into()
+        .expect("workspace package version must be a valid semantic version")
+}
+
+fn ensure_exact_cuvs_version(package: &cmake_package::CMakePackage) -> Result<(), DiscoveryError> {
+    let found = package.version.ok_or(DiscoveryError::VersionUnavailable)?;
+    if found != requested_version() {
+        return Err(DiscoveryError::VersionMismatch {
+            found: found.to_string(),
+            required: PACKAGE_VERSION,
+        });
+    }
+    Ok(())
+}
+
+fn find_target(
+    package: &cmake_package::CMakePackage,
+    package_name: &'static str,
+    target_name: &'static str,
+) -> Result<cmake_package::CMakeTarget, DiscoveryError> {
+    package
+        .target(target_name)
+        .ok_or(DiscoveryError::MissingTarget {
+            package: package_name,
+            target: target_name,
+        })
+}
+
+fn find_cuvs_package(
+    prefix: Option<PathBuf>,
+) -> Result<cmake_package::CMakePackage, DiscoveryError> {
+    let mut builder = find_package("cuvs").components([CUVS_COMPONENT.to_owned()]);
+    if let Some(ref path) = prefix {
+        builder = builder.prefix_paths(vec![path.to_path_buf()]);
+    }
+    let package = builder.find().map_err(|e| match e {
+        CmakeError::Version(VersionError::InvalidVersion) => DiscoveryError::VersionUnavailable,
+        CmakeError::Version(VersionError::VersionTooOld(v)) => DiscoveryError::VersionMismatch {
+            found: v.to_string(),
+            required: PACKAGE_VERSION,
+        },
+        CmakeError::CMakeNotFound | CmakeError::UnsupportedCMakeVersion => {
+            DiscoveryError::CmakeUnavailable
+        }
+        _ => DiscoveryError::NotFound,
+    })?;
+    ensure_exact_cuvs_version(&package)?;
+    Ok(package)
+}
+
+fn find_cudatoolkit_package() -> Result<cmake_package::CMakePackage, DiscoveryError> {
+    find_package("CUDAToolkit").find().map_err(|e| match e {
+        CmakeError::CMakeNotFound | CmakeError::UnsupportedCMakeVersion => {
+            DiscoveryError::CmakeUnavailable
+        }
+        _ => DiscoveryError::CudaToolkitNotFound,
+    })
+}
+
+fn find_dlpack_package() -> Result<cmake_package::CMakePackage, DiscoveryError> {
+    find_package("dlpack").find().map_err(|e| match e {
+        CmakeError::CMakeNotFound | CmakeError::UnsupportedCMakeVersion => {
+            DiscoveryError::CmakeUnavailable
+        }
+        _ => DiscoveryError::DlpackNotFound,
+    })
 }
 
 /// Run CMake `find_package(cuvs)` and extract the include and library directories.
@@ -58,48 +154,41 @@ enum DiscoveryError {
 /// When `prefix` is provided, it is passed as `CMAKE_PREFIX_PATH` so CMake
 /// searches under that installation root (e.g. `<prefix>/lib/cmake/cuvs`).
 fn try_find_cuvs_package(prefix: Option<PathBuf>) -> Result<CuvsMetadata, DiscoveryError> {
-    let mut builder = find_package("cuvs")
-        .version(PACKAGE_VERSION)
-        .components([CUVS_COMPONENT.to_owned()]);
-    if let Some(path) = prefix {
-        builder = builder.prefix_paths(vec![path]);
-    }
-    let package = builder.find().map_err(|e| match e {
-        CmakeError::Version(VersionError::VersionTooOld(v)) => {
-            DiscoveryError::VersionMismatch {
-                found: format!("{}.{}.{}", v.major, v.minor, v.patch),
-                required: PACKAGE_VERSION,
-            }
-        }
-        CmakeError::CMakeNotFound | CmakeError::UnsupportedCMakeVersion => {
-            DiscoveryError::CmakeUnavailable
-        }
-        _ => DiscoveryError::NotFound,
-    })?;
-
-    let target = package
-        .target("cuvs::c_api")
-        .ok_or(DiscoveryError::NotFound)?;
+    let package = find_cuvs_package(prefix)?;
+    let target = find_target(&package, "cuvs", CUVS_C_API_TARGET)?;
 
     let include_dir = target
         .include_directories
         .first()
-        .cloned()
+        .map(PathBuf::from)
         .ok_or(DiscoveryError::NotFound)?;
+
+    let cudatoolkit = find_cudatoolkit_package()?;
+    let cudatoolkit_target = find_target(&cudatoolkit, "CUDAToolkit", CUDA_TOOLKIT_TARGET)?;
+    let dlpack = find_dlpack_package()?;
+    let dlpack_target = find_target(&dlpack, "dlpack", DLPACK_TARGET)?;
+    let bindgen_include_dirs = target
+        .include_directories
+        .iter()
+        .chain(cudatoolkit_target.include_directories.iter())
+        .chain(dlpack_target.include_directories.iter())
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .collect();
 
     let lib_dir = target
         .location
         .as_deref()
         .and_then(|location| Path::new(location).parent())
-        .and_then(|path| path.to_str())
-        .map(str::to_owned)
-        .or_else(|| target.link_directories.first().cloned())
+        .map(Path::to_path_buf)
+        .or_else(|| target.link_directories.first().map(PathBuf::from))
         .ok_or(DiscoveryError::NotFound)?;
 
     target.link();
 
     Ok(CuvsMetadata {
         include_dir,
+        bindgen_include_dirs,
         lib_dir,
     })
 }
@@ -205,18 +294,22 @@ fn locate_cuvs() -> Result<CuvsMetadata, DiscoveryError> {
 }
 
 #[cfg(feature = "generate-bindings")]
-fn generate_bindings(include_dir: &str) {
+fn generate_bindings(include_dirs: &[PathBuf]) {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set by Cargo"));
 
-    bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header("cuvs_c_wrapper.h")
         .must_use_type("cuvsError_t")
         .allowlist_function("cuvs.*")
         .allowlist_type("(cuvs|DL).*")
         .rustified_enum("(cuvs|DL).*")
-        .clang_arg(format!("-I{include_dir}"))
-        .clang_arg("-Ivendor") // vendored dlpack header
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+
+    for include_dir in include_dirs {
+        builder = builder.clang_arg(format!("-I{}", include_dir.display()));
+    }
+
+    builder
         .generate()
         .expect("bindgen failed to generate cuvs bindings")
         .write_to_file(out_dir.join("cuvs_bindings.rs"))
@@ -224,12 +317,13 @@ fn generate_bindings(include_dir: &str) {
 }
 
 #[cfg(not(feature = "generate-bindings"))]
-fn generate_bindings(_include_dir: &str) {
+fn generate_bindings(_include_dirs: &[PathBuf]) {
     // Pre-generated bindings are used from src/bindings.rs.
 }
 
 fn main() {
     println!("cargo::rerun-if-env-changed=CMAKE_PREFIX_PATH");
+    println!("cargo::rerun-if-env-changed=CONDA_PREFIX");
     println!("cargo::rerun-if-env-changed=VIRTUAL_ENV");
     println!("cargo::rerun-if-env-changed=cuvs_DIR");
     #[cfg(feature = "vendored")]
@@ -250,9 +344,9 @@ fn main() {
     };
 
     // Expose include path to downstream crates via DEP_CUVS_C_INCLUDE.
-    println!("cargo::metadata=include={}", metadata.include_dir);
+    println!("cargo::metadata=include={}", metadata.include_dir.display());
     // Expose the directory containing libcuvs_c.so via DEP_CUVS_C_LIB.
-    println!("cargo::metadata=lib={}", metadata.lib_dir);
+    println!("cargo::metadata=lib={}", metadata.lib_dir.display());
 
-    generate_bindings(&metadata.include_dir);
+    generate_bindings(&metadata.bindgen_include_dirs);
 }

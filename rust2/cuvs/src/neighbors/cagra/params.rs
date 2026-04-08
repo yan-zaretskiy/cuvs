@@ -11,7 +11,9 @@
 //! setters are optional; unset values retain the library defaults from the
 //! underlying C `*ParamsCreate` functions.
 
-use std::{ffi::c_void, fmt, ptr};
+use std::ffi::{CString, c_void};
+use std::path::Path;
+use std::{fmt, ptr};
 
 use bon::bon;
 
@@ -19,7 +21,7 @@ use crate::distance::DistanceType;
 use crate::error::check_cuvs;
 use crate::ffi;
 
-use super::{CagraError, GraphBuildAlgo, HashMode, SearchAlgo};
+use super::{CagraError, GraphBuildAlgo, HashMode, HnswHeuristicType, SearchAlgo};
 
 // ---------------------------------------------------------------------------
 // CompressionParams
@@ -109,25 +111,263 @@ impl Drop for CompressionParams {
 }
 
 // ---------------------------------------------------------------------------
+// AceParams
+// ---------------------------------------------------------------------------
+
+/// Parameters for ACE (Augmented Core Extraction) graph build.
+///
+/// ACE enables building indices for datasets too large to fit in GPU memory
+/// by partitioning the data, building sub-indices, and merging the graphs.
+///
+/// ```ignore
+/// use cuvs::neighbors::cagra::AceParams;
+///
+/// let ace = AceParams::builder()
+///     .npartitions(4)
+///     .use_disk(true)
+///     .build_dir("/tmp/ace")
+///     .build()?;
+/// ```
+pub struct AceParams {
+    handle: ffi::cuvsAceParams_t,
+}
+
+#[bon]
+impl AceParams {
+    #[builder]
+    pub fn new(
+        npartitions: Option<usize>,
+        ef_construction: Option<usize>,
+        build_dir: Option<&Path>,
+        use_disk: Option<bool>,
+        max_host_memory_gb: Option<f64>,
+        max_gpu_memory_gb: Option<f64>,
+    ) -> Result<Self, CagraError> {
+        let params = Self::try_default()?;
+
+        unsafe {
+            if let Some(v) = npartitions {
+                (*params.handle).npartitions = v;
+            }
+            if let Some(v) = ef_construction {
+                (*params.handle).ef_construction = v;
+            }
+            if let Some(v) = use_disk {
+                (*params.handle).use_disk = v;
+            }
+            if let Some(v) = max_host_memory_gb {
+                (*params.handle).max_host_memory_gb = v;
+            }
+            if let Some(v) = max_gpu_memory_gb {
+                (*params.handle).max_gpu_memory_gb = v;
+            }
+        }
+
+        if let Some(dir) = build_dir {
+            let c_str = CString::new(dir.as_os_str().as_encoded_bytes())?;
+            check_cuvs(unsafe { ffi::cuvsAceParamsSetBuildDir(params.handle, c_str.as_ptr()) })?;
+        }
+
+        Ok(params)
+    }
+}
+
+impl AceParams {
+    fn try_default() -> Result<Self, CagraError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsAceParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
+    fn handle(&self) -> ffi::cuvsAceParams_t {
+        self.handle
+    }
+}
+
+impl fmt::Debug for AceParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AceParams")
+            .field(unsafe { &*self.handle })
+            .finish()
+    }
+}
+
+impl Drop for AceParams {
+    fn drop(&mut self) {
+        let _ = unsafe { ffi::cuvsAceParamsDestroy(self.handle) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IvfPqGraphBuildParams
+// ---------------------------------------------------------------------------
+
+/// IVF-PQ parameters used for CAGRA graph construction.
+///
+/// This wraps the composite `cuvsIvfPqParams` struct that bundles IVF-PQ
+/// build params, search params, and a refinement rate.
+///
+/// ```ignore
+/// use cuvs::neighbors::cagra::IvfPqGraphBuildParams;
+///
+/// let ivf_pq = IvfPqGraphBuildParams::builder()
+///     .n_lists(100)
+///     .pq_dim(16)
+///     .refinement_rate(2.0)
+///     .build()?;
+/// ```
+// Box-allocated because the C API has no `cuvsIvfPqParamsCreate` — only the
+// nested build/search params have C allocators.  We need a stable heap
+// address so `graph_build_params` can point into it across moves of the
+// owning `IndexParams`.
+pub struct IvfPqGraphBuildParams {
+    inner: Box<ffi::cuvsIvfPqParams>,
+}
+
+#[bon]
+impl IvfPqGraphBuildParams {
+    #[builder]
+    pub fn new(
+        n_lists: Option<u32>,
+        kmeans_n_iters: Option<u32>,
+        kmeans_trainset_fraction: Option<f64>,
+        pq_bits: Option<u32>,
+        pq_dim: Option<u32>,
+        n_probes: Option<u32>,
+        refinement_rate: Option<f32>,
+    ) -> Result<Self, CagraError> {
+        let mut build_handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfPqIndexParamsCreate(&mut build_handle) })?;
+
+        // Wrap early so Drop cleans up build_handle if search create fails.
+        let mut params = Self {
+            inner: Box::new(ffi::cuvsIvfPqParams {
+                ivf_pq_build_params: build_handle,
+                ivf_pq_search_params: ptr::null_mut(),
+                refinement_rate: refinement_rate.unwrap_or(2.0),
+            }),
+        };
+
+        let mut search_handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfPqSearchParamsCreate(&mut search_handle) })?;
+        params.inner.ivf_pq_search_params = search_handle;
+
+        unsafe {
+            if let Some(v) = n_lists {
+                (*build_handle).n_lists = v;
+            }
+            if let Some(v) = kmeans_n_iters {
+                (*build_handle).kmeans_n_iters = v;
+            }
+            if let Some(v) = kmeans_trainset_fraction {
+                (*build_handle).kmeans_trainset_fraction = v;
+            }
+            if let Some(v) = pq_bits {
+                (*build_handle).pq_bits = v;
+            }
+            if let Some(v) = pq_dim {
+                (*build_handle).pq_dim = v;
+            }
+            if let Some(v) = n_probes {
+                (*search_handle).n_probes = v;
+            }
+        }
+
+        Ok(params)
+    }
+}
+
+impl IvfPqGraphBuildParams {
+    fn as_mut_ptr(&mut self) -> *mut ffi::cuvsIvfPqParams {
+        &mut *self.inner as *mut _
+    }
+}
+
+impl fmt::Debug for IvfPqGraphBuildParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IvfPqGraphBuildParams")
+            .field("refinement_rate", &self.inner.refinement_rate)
+            .finish()
+    }
+}
+
+impl Drop for IvfPqGraphBuildParams {
+    fn drop(&mut self) {
+        let bp = self.inner.ivf_pq_build_params;
+        let sp = self.inner.ivf_pq_search_params;
+        if !bp.is_null() {
+            let _ = unsafe { ffi::cuvsIvfPqIndexParamsDestroy(bp) };
+        }
+        if !sp.is_null() {
+            let _ = unsafe { ffi::cuvsIvfPqSearchParamsDestroy(sp) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RequestedGraphBuild / GraphBuildOwner
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum RequestedGraphBuild {
+    Auto,
+    NnDescent { nn_descent_niter: Option<usize> },
+    IterativeCagraSearch,
+    AceDefault,
+    Ace(AceParams),
+    IvfPqDefault,
+    IvfPq(IvfPqGraphBuildParams),
+}
+
+enum GraphBuildOwner {
+    /// Rust-owned ACE params.
+    Ace(AceParams),
+    /// Rust-owned custom IVF-PQ params.
+    IvfPq(IvfPqGraphBuildParams),
+}
+
+impl GraphBuildOwner {
+    fn as_mut_ptr(&mut self) -> *mut c_void {
+        match self {
+            Self::Ace(ace) => ace.handle().cast::<c_void>(),
+            Self::IvfPq(ivf_pq) => ivf_pq.as_mut_ptr().cast::<c_void>(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IndexParams
 // ---------------------------------------------------------------------------
 
 /// Parameters for building a CAGRA index.
 ///
 /// ```ignore
-/// use cuvs::neighbors::cagra::{IndexParams, GraphBuildAlgo};
+/// use cuvs::neighbors::cagra::IndexParams;
 /// use cuvs::distance::DistanceType;
 ///
 /// let params = IndexParams::builder()
 ///     .metric(DistanceType::InnerProduct)
 ///     .graph_degree(64)
-///     .build_algo(GraphBuildAlgo::NnDescent)
+///     .nn_descent()
 ///     .build()?;
+/// ```
+///
+/// Graph-build strategy setters should be mutually exclusive.
+///
+/// ```compile_fail
+/// use cuvs::neighbors::cagra::{AceParams, IndexParams, IvfPqGraphBuildParams};
+///
+/// let ace = AceParams::builder().build().unwrap();
+/// let ivf_pq = IvfPqGraphBuildParams::builder().build().unwrap();
+///
+/// let _params = IndexParams::builder()
+///     .ace_params(ace)
+///     .ivf_pq_params(ivf_pq);
 /// ```
 pub struct IndexParams {
     handle: ffi::cuvsCagraIndexParams_t,
     default_graph_build_params: *mut c_void,
-    ace_graph_build_params: Option<ffi::cuvsAceParams_t>,
+    graph_build_owner: Option<GraphBuildOwner>,
     compression: Option<CompressionParams>,
 }
 
@@ -138,9 +378,9 @@ impl IndexParams {
         metric: Option<DistanceType>,
         intermediate_graph_degree: Option<usize>,
         graph_degree: Option<usize>,
-        build_algo: Option<GraphBuildAlgo>,
-        nn_descent_niter: Option<usize>,
         compression: Option<CompressionParams>,
+        #[builder(setters(vis = "", some_fn = graph_build_internal))]
+        graph_build: Option<RequestedGraphBuild>,
     ) -> Result<Self, CagraError> {
         if let Some(d) = graph_degree
             && d == 0 {
@@ -154,12 +394,15 @@ impl IndexParams {
                 )));
             }
 
-        if let Some(n) = nn_descent_niter
-            && n == 0 {
+        if let Some(RequestedGraphBuild::NnDescent {
+            nn_descent_niter: Some(n),
+        }) = &graph_build
+            && *n == 0
+        {
                 return Err(CagraError::Validation(
                     "nn_descent_niter must be > 0".into(),
                 ));
-            }
+        }
 
         let metric_supports_compression = metric.is_none_or(|v| v == DistanceType::L2Expanded);
         if compression.is_some() && !metric_supports_compression {
@@ -175,7 +418,7 @@ impl IndexParams {
         let mut params = Self {
             handle,
             default_graph_build_params,
-            ace_graph_build_params: None,
+            graph_build_owner: None,
             compression: None,
         };
 
@@ -189,20 +432,90 @@ impl IndexParams {
             if let Some(v) = graph_degree {
                 (*params.handle).graph_degree = v;
             }
-            if let Some(v) = nn_descent_niter {
-                (*params.handle).nn_descent_niter = v;
-            }
         }
 
         if let Some(compression) = compression {
-            unsafe {
-                (*params.handle).compression = compression.handle();
-            }
+            unsafe { (*params.handle).compression = compression.handle() };
             params.compression = Some(compression);
         }
 
-        params.apply_build_algo(build_algo)?;
+        params.apply_graph_build(graph_build)?;
         Ok(params)
+    }
+}
+
+use index_params_builder::{IsUnset, SetGraphBuild, State};
+
+impl<S: State> IndexParamsBuilder<S> {
+    /// Use the library's automatic graph-build selection.
+    pub fn auto(self) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::Auto)
+    }
+
+    /// Build the graph with NN-Descent using the library defaults.
+    pub fn nn_descent(self) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::NnDescent {
+            nn_descent_niter: None,
+        })
+    }
+
+    /// Build the graph with NN-Descent and an explicit iteration count.
+    pub fn nn_descent_niter(self, nn_descent_niter: usize) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::NnDescent {
+            nn_descent_niter: Some(nn_descent_niter),
+        })
+    }
+
+    /// Build the graph using iterative CAGRA search.
+    pub fn iterative_cagra_search(self) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::IterativeCagraSearch)
+    }
+
+    /// Build the graph with ACE using the library defaults.
+    pub fn ace(self) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::AceDefault)
+    }
+
+    /// Build the graph with explicit ACE parameters.
+    pub fn ace_params(self, ace_params: AceParams) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::Ace(ace_params))
+    }
+
+    /// Build the graph with IVF-PQ using the library defaults.
+    pub fn ivf_pq(self) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::IvfPqDefault)
+    }
+
+    /// Build the graph with explicit IVF-PQ graph-build parameters.
+    pub fn ivf_pq_params(
+        self,
+        ivf_pq_params: IvfPqGraphBuildParams,
+    ) -> IndexParamsBuilder<SetGraphBuild<S>>
+    where
+        S::GraphBuild: IsUnset,
+    {
+        self.graph_build_internal(RequestedGraphBuild::IvfPq(ivf_pq_params))
     }
 }
 
@@ -211,33 +524,122 @@ impl IndexParams {
         self.handle
     }
 
-    fn apply_build_algo(&mut self, build_algo: Option<GraphBuildAlgo>) -> Result<(), CagraError> {
-        let Some(build_algo) = build_algo else {
+    /// Populate `graph_build_params` from HNSW-compatible parameters.
+    ///
+    /// The C factory sets `build_algo`, `graph_degree`,
+    /// `intermediate_graph_degree`, and `graph_build_params` on the handle.
+    pub fn from_hnsw_params(
+        n_rows: i64,
+        dim: i64,
+        m: i32,
+        ef_construction: i32,
+        heuristic: HnswHeuristicType,
+        metric: DistanceType,
+    ) -> Result<Self, CagraError> {
+        if n_rows <= 0 {
+            return Err(CagraError::Validation("n_rows must be > 0".into()));
+        }
+        if dim <= 0 {
+            return Err(CagraError::Validation("dim must be > 0".into()));
+        }
+        if m <= 0 {
+            return Err(CagraError::Validation("m must be > 0".into()));
+        }
+        if ef_construction <= 0 {
+            return Err(CagraError::Validation(
+                "ef_construction must be > 0".into(),
+            ));
+        }
+
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsCagraIndexParamsCreate(&mut handle) })?;
+        let default_graph_build_params = unsafe { (*handle).graph_build_params };
+
+        // Wrap early so Drop cleans up if the factory call fails.
+        let params = Self {
+            handle,
+            default_graph_build_params,
+            graph_build_owner: None,
+            compression: None,
+        };
+
+        check_cuvs(unsafe {
+            ffi::cuvsCagraIndexParamsFromHnswParams(
+                params.handle,
+                n_rows,
+                dim,
+                m,
+                ef_construction,
+                heuristic.into(),
+                metric.into(),
+            )
+        })?;
+
+        Ok(params)
+    }
+
+    fn apply_graph_build(&mut self, graph_build: Option<RequestedGraphBuild>) -> Result<(), CagraError> {
+        let Some(graph_build) = graph_build else {
             return Ok(());
         };
 
-        match build_algo {
-            GraphBuildAlgo::Ace => {
-                let mut ace_params = ptr::null_mut();
-                check_cuvs(unsafe { ffi::cuvsAceParamsCreate(&mut ace_params) })?;
+        match graph_build {
+            RequestedGraphBuild::Auto => {
                 unsafe {
-                    (*self.handle).build_algo = build_algo.into();
-                    (*self.handle).graph_build_params = ace_params.cast::<c_void>();
+                    (*self.handle).build_algo = GraphBuildAlgo::Auto.into();
+                    (*self.handle).graph_build_params = ptr::null_mut();
                 }
-                if let Some(prev) = self.ace_graph_build_params.replace(ace_params) {
-                    let _ = unsafe { ffi::cuvsAceParamsDestroy(prev) };
+                self.graph_build_owner = None;
+            }
+            RequestedGraphBuild::NnDescent { nn_descent_niter } => {
+                unsafe {
+                    (*self.handle).build_algo = GraphBuildAlgo::NnDescent.into();
+                    (*self.handle).graph_build_params = ptr::null_mut();
+                    if let Some(v) = nn_descent_niter {
+                        (*self.handle).nn_descent_niter = v;
+                    }
+                }
+                self.graph_build_owner = None;
+            }
+            RequestedGraphBuild::IterativeCagraSearch => {
+                unsafe {
+                    (*self.handle).build_algo = GraphBuildAlgo::IterativeCagraSearch.into();
+                    (*self.handle).graph_build_params = ptr::null_mut();
+                }
+                self.graph_build_owner = None;
+            }
+            RequestedGraphBuild::AceDefault => {
+                let ace = AceParams::try_default()?;
+                self.graph_build_owner = Some(GraphBuildOwner::Ace(ace));
+                unsafe {
+                    (*self.handle).build_algo = GraphBuildAlgo::Ace.into();
+                    (*self.handle).graph_build_params =
+                        self.graph_build_owner.as_mut().unwrap().as_mut_ptr();
                 }
             }
-            GraphBuildAlgo::Auto
-            | GraphBuildAlgo::NnDescent
-            | GraphBuildAlgo::IterativeCagraSearch => unsafe {
-                (*self.handle).build_algo = build_algo.into();
-                (*self.handle).graph_build_params = ptr::null_mut();
-            },
-            GraphBuildAlgo::IvfPq => unsafe {
-                (*self.handle).build_algo = build_algo.into();
-                (*self.handle).graph_build_params = self.default_graph_build_params;
-            },
+            RequestedGraphBuild::Ace(ace) => {
+                self.graph_build_owner = Some(GraphBuildOwner::Ace(ace));
+                unsafe {
+                    (*self.handle).build_algo = GraphBuildAlgo::Ace.into();
+                    (*self.handle).graph_build_params =
+                        self.graph_build_owner.as_mut().unwrap().as_mut_ptr();
+                }
+            }
+            RequestedGraphBuild::IvfPqDefault => {
+                unsafe {
+                    (*self.handle).build_algo = GraphBuildAlgo::IvfPq.into();
+                    (*self.handle).graph_build_params = self.default_graph_build_params;
+                }
+                self.graph_build_owner = None;
+            }
+            RequestedGraphBuild::IvfPq(ivf_pq) => {
+                self.graph_build_owner = Some(GraphBuildOwner::IvfPq(ivf_pq));
+                unsafe {
+                    (*self.handle).build_algo = GraphBuildAlgo::IvfPq.into();
+                    (*self.handle).graph_build_params =
+                        self.graph_build_owner.as_mut().unwrap().as_mut_ptr();
+                }
+            }
         }
 
         Ok(())
@@ -254,31 +656,12 @@ impl fmt::Debug for IndexParams {
 
 impl Drop for IndexParams {
     fn drop(&mut self) {
-        // Ownership contract with the C layer:
-        // - `cuvsCagraIndexParamsCreate()` installs the default IVF-PQ
-        //   `graph_build_params` allocation.
-        // - `cuvsCagraIndexParamsDestroy()` frees whatever
-        //   `graph_build_params` currently points to based on `build_algo`.
-        // - Rust swaps that field between the original C-owned IVF-PQ payload,
-        //   a Rust-owned ACE payload, and `null` for algorithms that do not use
-        //   graph-build params.
-        //
-        // Before delegating to the C destructor we therefore restore the
-        // original C-owned IVF-PQ pointer whenever Rust has either taken
-        // ownership of ACE params or nulled the field out, so the C side frees
-        // the correct allocation exactly once.
+        // Restore the C-owned default IVF-PQ graph_build_params so the C
+        // destructor frees its own allocation exactly once. Rust-owned graph
+        // build params are dropped immediately afterwards.
         unsafe {
-            if let Some(ace_params) = self.ace_graph_build_params.take() {
-                let _ = ffi::cuvsAceParamsDestroy(ace_params);
-                (*self.handle).graph_build_params = self.default_graph_build_params;
-                (*self.handle).build_algo = ffi::cuvsCagraGraphBuildAlgo::IVF_PQ;
-            } else if (*self.handle).graph_build_params.is_null()
-                && !self.default_graph_build_params.is_null()
-            {
-                (*self.handle).graph_build_params = self.default_graph_build_params;
-                (*self.handle).build_algo = ffi::cuvsCagraGraphBuildAlgo::IVF_PQ;
-            }
-
+            (*self.handle).graph_build_params = self.default_graph_build_params;
+            (*self.handle).build_algo = ffi::cuvsCagraGraphBuildAlgo::IVF_PQ;
             let _ = ffi::cuvsCagraIndexParamsDestroy(self.handle);
         }
     }
@@ -506,6 +889,9 @@ impl Drop for ExtendParams {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{CStr, CString};
+    use std::path::Path;
+
     use super::*;
     use crate::ffi;
 
@@ -518,6 +904,7 @@ mod tests {
             assert_eq!((*params.handle).metric, ffi::cuvsDistanceType::L2Expanded);
             assert_eq!((*params.handle).graph_degree, 64);
         }
+        assert!(params.graph_build_owner.is_none());
     }
 
     #[test]
@@ -526,7 +913,6 @@ mod tests {
             .metric(DistanceType::InnerProduct)
             .graph_degree(64)
             .intermediate_graph_degree(128)
-            .build_algo(GraphBuildAlgo::NnDescent)
             .nn_descent_niter(10)
             .build()
             .unwrap();
@@ -574,7 +960,7 @@ mod tests {
     #[test]
     fn index_params_switching_to_nn_descent_clears_default_graph_build_params() {
         let params = IndexParams::builder()
-            .build_algo(GraphBuildAlgo::NnDescent)
+            .nn_descent()
             .build()
             .unwrap();
 
@@ -585,6 +971,7 @@ mod tests {
             );
             assert!((*params.handle).graph_build_params.is_null());
         }
+        assert!(params.graph_build_owner.is_none());
     }
 
     #[test]
@@ -620,6 +1007,264 @@ mod tests {
             assert!(!c.is_null());
             assert_eq!((*c).pq_bits, 4);
             assert_eq!((*c).pq_dim, 8);
+        }
+    }
+
+    #[test]
+    fn index_params_with_ace_params() {
+        let params = IndexParams::builder()
+            .ace_params(AceParams::builder().npartitions(4).build().unwrap())
+            .build()
+            .unwrap();
+
+        unsafe {
+            assert_eq!(
+                (*params.handle).build_algo,
+                ffi::cuvsCagraGraphBuildAlgo::ACE
+            );
+            assert!(!(*params.handle).graph_build_params.is_null());
+            let ace = (*params.handle).graph_build_params as ffi::cuvsAceParams_t;
+            assert_eq!((*ace).npartitions, 4);
+        }
+        assert!(params.graph_build_owner.is_some());
+    }
+
+    #[test]
+    fn index_params_ace_implied_by_ace_params() {
+        let params = IndexParams::builder()
+            .ace_params(AceParams::builder().build().unwrap())
+            .build()
+            .unwrap();
+
+        unsafe {
+            assert_eq!(
+                (*params.handle).build_algo,
+                ffi::cuvsCagraGraphBuildAlgo::ACE
+            );
+        }
+    }
+
+    #[test]
+    fn index_params_with_default_ace() {
+        let params = IndexParams::builder()
+            .ace()
+            .build()
+            .unwrap();
+
+        unsafe {
+            assert_eq!(
+                (*params.handle).build_algo,
+                ffi::cuvsCagraGraphBuildAlgo::ACE
+            );
+            assert!(!(*params.handle).graph_build_params.is_null());
+        }
+    }
+
+    #[test]
+    fn index_params_with_ivf_pq_params() {
+        let params = IndexParams::builder()
+            .ivf_pq_params(
+                IvfPqGraphBuildParams::builder()
+                    .n_lists(100)
+                    .refinement_rate(3.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        unsafe {
+            assert_eq!(
+                (*params.handle).build_algo,
+                ffi::cuvsCagraGraphBuildAlgo::IVF_PQ
+            );
+            assert!(!(*params.handle).graph_build_params.is_null());
+        }
+        assert!(params.graph_build_owner.is_some());
+    }
+
+    #[test]
+    fn index_params_with_default_ivf_pq() {
+        let params = IndexParams::builder()
+            .ivf_pq()
+            .build()
+            .unwrap();
+
+        unsafe {
+            assert_eq!(
+                (*params.handle).build_algo,
+                ffi::cuvsCagraGraphBuildAlgo::IVF_PQ
+            );
+            assert!(!(*params.handle).graph_build_params.is_null());
+        }
+    }
+
+    #[test]
+    fn index_params_from_hnsw_params() {
+        let params = IndexParams::from_hnsw_params(
+            10000,
+            128,
+            16,
+            200,
+            HnswHeuristicType::SimilarSearchPerformance,
+            DistanceType::L2Expanded,
+        )
+        .unwrap();
+
+        unsafe {
+            assert!((*params.handle).graph_degree > 0);
+        }
+        assert!(params.graph_build_owner.is_none());
+    }
+
+    #[test]
+    fn index_params_from_hnsw_params_rejects_non_positive_n_rows() {
+        let err = IndexParams::from_hnsw_params(
+            0,
+            128,
+            16,
+            200,
+            HnswHeuristicType::SimilarSearchPerformance,
+            DistanceType::L2Expanded,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("n_rows must be > 0"));
+    }
+
+    #[test]
+    fn index_params_from_hnsw_params_rejects_non_positive_dim() {
+        let err = IndexParams::from_hnsw_params(
+            10000,
+            0,
+            16,
+            200,
+            HnswHeuristicType::SimilarSearchPerformance,
+            DistanceType::L2Expanded,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("dim must be > 0"));
+    }
+
+    #[test]
+    fn index_params_from_hnsw_params_rejects_non_positive_m() {
+        let err = IndexParams::from_hnsw_params(
+            10000,
+            128,
+            0,
+            200,
+            HnswHeuristicType::SimilarSearchPerformance,
+            DistanceType::L2Expanded,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("m must be > 0"));
+    }
+
+    #[test]
+    fn index_params_from_hnsw_params_rejects_non_positive_ef_construction() {
+        let err = IndexParams::from_hnsw_params(
+            10000,
+            128,
+            16,
+            0,
+            HnswHeuristicType::SimilarSearchPerformance,
+            DistanceType::L2Expanded,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ef_construction must be > 0"));
+    }
+
+    // -- AceParams ---------------------------------------------------------
+
+    #[test]
+    fn ace_params_all_defaults() {
+        let params = AceParams::try_default().unwrap();
+        unsafe {
+            assert!((*params.handle).ef_construction > 0);
+            assert!(!(*params.handle).build_dir.is_null());
+            assert_eq!((*params.handle).use_disk, false);
+        }
+    }
+
+    #[test]
+    fn ace_params_with_values() {
+        let params = AceParams::builder()
+            .npartitions(8)
+            .ef_construction(128)
+            .use_disk(true)
+            .max_host_memory_gb(16.0)
+            .max_gpu_memory_gb(8.0)
+            .build()
+            .unwrap();
+
+        unsafe {
+            assert_eq!((*params.handle).npartitions, 8);
+            assert_eq!((*params.handle).ef_construction, 128);
+            assert_eq!((*params.handle).use_disk, true);
+            assert_eq!((*params.handle).max_host_memory_gb, 16.0);
+            assert_eq!((*params.handle).max_gpu_memory_gb, 8.0);
+        }
+    }
+
+    #[test]
+    fn ace_params_with_build_dir() {
+        let params = AceParams::builder()
+            .build_dir(Path::new("/tmp/ace"))
+            .build()
+            .unwrap();
+
+        unsafe {
+            assert!(!(*params.handle).build_dir.is_null());
+            let build_dir = CStr::from_ptr((*params.handle).build_dir);
+            assert_eq!(build_dir.to_bytes(), b"/tmp/ace");
+        }
+    }
+
+    #[test]
+    fn ace_params_c_api_can_replace_build_dir() {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsAceParamsCreate(&mut handle) }).unwrap();
+
+        let first = CString::new("/tmp/ace-one").unwrap();
+        let second = CString::new("/tmp/ace-two").unwrap();
+        check_cuvs(unsafe { ffi::cuvsAceParamsSetBuildDir(handle, first.as_ptr()) }).unwrap();
+        check_cuvs(unsafe { ffi::cuvsAceParamsSetBuildDir(handle, second.as_ptr()) }).unwrap();
+
+        unsafe {
+            let build_dir = CStr::from_ptr((*handle).build_dir);
+            assert_eq!(build_dir.to_bytes(), b"/tmp/ace-two");
+            let _ = ffi::cuvsAceParamsDestroy(handle);
+        }
+    }
+
+    // -- IvfPqGraphBuildParams ---------------------------------------------
+
+    #[test]
+    fn ivf_pq_graph_build_params_defaults() {
+        let params = IvfPqGraphBuildParams::builder().build().unwrap();
+        assert_eq!(params.inner.refinement_rate, 2.0);
+    }
+
+    #[test]
+    fn ivf_pq_graph_build_params_with_values() {
+        let params = IvfPqGraphBuildParams::builder()
+            .n_lists(200)
+            .pq_bits(4)
+            .pq_dim(16)
+            .n_probes(20)
+            .refinement_rate(3.0)
+            .build()
+            .unwrap();
+
+        assert_eq!(params.inner.refinement_rate, 3.0);
+        unsafe {
+            assert_eq!((*params.inner.ivf_pq_build_params).n_lists, 200);
+            assert_eq!((*params.inner.ivf_pq_build_params).pq_bits, 4);
+            assert_eq!((*params.inner.ivf_pq_build_params).pq_dim, 16);
+            assert_eq!((*params.inner.ivf_pq_search_params).n_probes, 20);
         }
     }
 

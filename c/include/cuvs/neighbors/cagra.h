@@ -267,6 +267,19 @@ cuvsError_t cuvsCagraCompressionParamsDestroy(cuvsCagraCompressionParams_t param
 cuvsError_t cuvsAceParamsCreate(cuvsAceParams_t* params);
 
 /**
+ * @brief Replace the ACE build directory with a copied C-owned string.
+ *
+ * The params object duplicates the provided string and takes ownership of the
+ * duplicate. The caller retains ownership of `build_dir` and may free it after
+ * this function returns.
+ *
+ * @param[in] params ACE params to update
+ * @param[in] build_dir Non-null path string to copy into `params`
+ * @return cuvsError_t
+ */
+cuvsError_t cuvsAceParamsSetBuildDir(cuvsAceParams_t params, const char* build_dir);
+
+/**
  * @brief De-allocate ACE params
  *
  * @param[in] params

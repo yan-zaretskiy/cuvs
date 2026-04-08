@@ -27,6 +27,25 @@
 
 namespace {
 
+static auto _duplicate_c_string(const char* value) -> const char*
+{
+  RAFT_EXPECTS(value != nullptr, "input string must not be null");
+  auto copy = strdup(value);
+  RAFT_EXPECTS(copy != nullptr, "failed to allocate string copy");
+  return copy;
+}
+
+static void _set_ace_build_dir(cuvsAceParams* params, const char* build_dir)
+{
+  RAFT_EXPECTS(params != nullptr, "ACE params must not be null");
+  RAFT_EXPECTS(build_dir != nullptr, "input string must not be null");
+  auto build_dir_copy = strdup(build_dir);
+  RAFT_EXPECTS(build_dir_copy != nullptr, "failed to allocate string copy");
+
+  if (params->build_dir) { free(const_cast<char*>(params->build_dir)); }
+  params->build_dir = build_dir_copy;
+}
+
 static void _set_graph_build_params(
   std::variant<std::monostate,
                cuvs::neighbors::cagra::graph_build_params::ivf_pq_params,
@@ -422,11 +441,13 @@ static void _populate_cagra_index_params_from_cpp(cuvsCagraIndexParams_t c_param
     auto ace_params =
       std::get<cuvs::neighbors::cagra::graph_build_params::ace_params>(
         cpp_params.graph_build_params);
-    cuvsAceParams* c_ace_params = new cuvsAceParams;
-    c_ace_params->npartitions = ace_params.npartitions;
-    c_ace_params->ef_construction = ace_params.ef_construction;
-    c_ace_params->build_dir = ace_params.build_dir.empty() ? nullptr : strdup(ace_params.build_dir.c_str());
-    c_ace_params->use_disk = ace_params.use_disk;
+    cuvsAceParams* c_ace_params = new cuvsAceParams{.npartitions        = ace_params.npartitions,
+                                                    .ef_construction    = ace_params.ef_construction,
+                                                    .build_dir          = nullptr,
+                                                    .use_disk           = ace_params.use_disk,
+                                                    .max_host_memory_gb = ace_params.max_host_memory_gb,
+                                                    .max_gpu_memory_gb  = ace_params.max_gpu_memory_gb};
+    _set_ace_build_dir(c_ace_params, ace_params.build_dir.c_str());
     c_params->graph_build_params = c_ace_params;
   }
 }
@@ -791,16 +812,13 @@ extern "C" cuvsError_t cuvsAceParamsCreate(cuvsAceParams_t* params)
 {
   return cuvs::core::translate_exceptions([=] {
     auto ps = cuvs::neighbors::cagra::graph_build_params::ace_params();
-
-    // Allocate and copy the build directory string
-    const char* build_dir = strdup(ps.build_dir.c_str());
-
     *params = new cuvsAceParams{.npartitions         = ps.npartitions,
                                 .ef_construction     = ps.ef_construction,
-                                .build_dir           = build_dir,
+                                .build_dir           = nullptr,
                                 .use_disk            = ps.use_disk,
                                 .max_host_memory_gb  = ps.max_host_memory_gb,
                                 .max_gpu_memory_gb   = ps.max_gpu_memory_gb};
+    _set_ace_build_dir(*params, ps.build_dir.c_str());
   });
 }
 
@@ -813,6 +831,11 @@ extern "C" cuvsError_t cuvsAceParamsDestroy(cuvsAceParams_t params)
       delete params;
     }
   });
+}
+
+extern "C" cuvsError_t cuvsAceParamsSetBuildDir(cuvsAceParams_t params, const char* build_dir)
+{
+  return cuvs::core::translate_exceptions([=] { _set_ace_build_dir(params, build_dir); });
 }
 
 extern "C" cuvsError_t cuvsCagraIndexParamsFromHnswParams(cuvsCagraIndexParams_t params,
