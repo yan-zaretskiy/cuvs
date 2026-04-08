@@ -348,7 +348,7 @@ impl GraphBuildOwner {
 /// let params = IndexParams::builder()
 ///     .metric(DistanceType::InnerProduct)
 ///     .graph_degree(64)
-///     .nn_descent()
+///     .nn_descent_with(20)
 ///     .build()?;
 /// ```
 ///
@@ -361,8 +361,8 @@ impl GraphBuildOwner {
 /// let ivf_pq = IvfPqGraphBuildParams::builder().build().unwrap();
 ///
 /// let _params = IndexParams::builder()
-///     .ace_params(ace)
-///     .ivf_pq_params(ivf_pq);
+///     .ace_with(ace)
+///     .ivf_pq_with(ivf_pq);
 /// ```
 pub struct IndexParams {
     handle: ffi::cuvsCagraIndexParams_t,
@@ -466,12 +466,12 @@ impl<S: State> IndexParamsBuilder<S> {
     }
 
     /// Build the graph with NN-Descent and an explicit iteration count.
-    pub fn nn_descent_niter(self, nn_descent_niter: usize) -> IndexParamsBuilder<SetGraphBuild<S>>
+    pub fn nn_descent_with(self, iterations: usize) -> IndexParamsBuilder<SetGraphBuild<S>>
     where
         S::GraphBuild: IsUnset,
     {
         self.graph_build_internal(RequestedGraphBuild::NnDescent {
-            nn_descent_niter: Some(nn_descent_niter),
+            nn_descent_niter: Some(iterations),
         })
     }
 
@@ -492,11 +492,11 @@ impl<S: State> IndexParamsBuilder<S> {
     }
 
     /// Build the graph with explicit ACE parameters.
-    pub fn ace_params(self, ace_params: AceParams) -> IndexParamsBuilder<SetGraphBuild<S>>
+    pub fn ace_with(self, params: AceParams) -> IndexParamsBuilder<SetGraphBuild<S>>
     where
         S::GraphBuild: IsUnset,
     {
-        self.graph_build_internal(RequestedGraphBuild::Ace(ace_params))
+        self.graph_build_internal(RequestedGraphBuild::Ace(params))
     }
 
     /// Build the graph with IVF-PQ using the library defaults.
@@ -508,14 +508,14 @@ impl<S: State> IndexParamsBuilder<S> {
     }
 
     /// Build the graph with explicit IVF-PQ graph-build parameters.
-    pub fn ivf_pq_params(
+    pub fn ivf_pq_with(
         self,
-        ivf_pq_params: IvfPqGraphBuildParams,
+        params: IvfPqGraphBuildParams,
     ) -> IndexParamsBuilder<SetGraphBuild<S>>
     where
         S::GraphBuild: IsUnset,
     {
-        self.graph_build_internal(RequestedGraphBuild::IvfPq(ivf_pq_params))
+        self.graph_build_internal(RequestedGraphBuild::IvfPq(params))
     }
 }
 
@@ -913,7 +913,7 @@ mod tests {
             .metric(DistanceType::InnerProduct)
             .graph_degree(64)
             .intermediate_graph_degree(128)
-            .nn_descent_niter(10)
+            .nn_descent_with(10)
             .build()
             .unwrap();
 
@@ -951,7 +951,7 @@ mod tests {
     #[test]
     fn index_params_rejects_zero_niter() {
         let err = IndexParams::builder()
-            .nn_descent_niter(0)
+            .nn_descent_with(0)
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("nn_descent_niter must be > 0"));
@@ -1013,7 +1013,7 @@ mod tests {
     #[test]
     fn index_params_with_ace_params() {
         let params = IndexParams::builder()
-            .ace_params(AceParams::builder().npartitions(4).build().unwrap())
+            .ace_with(AceParams::builder().npartitions(4).build().unwrap())
             .build()
             .unwrap();
 
@@ -1030,9 +1030,9 @@ mod tests {
     }
 
     #[test]
-    fn index_params_ace_implied_by_ace_params() {
+    fn index_params_ace_implied_by_ace_with() {
         let params = IndexParams::builder()
-            .ace_params(AceParams::builder().build().unwrap())
+            .ace_with(AceParams::builder().build().unwrap())
             .build()
             .unwrap();
 
@@ -1063,7 +1063,7 @@ mod tests {
     #[test]
     fn index_params_with_ivf_pq_params() {
         let params = IndexParams::builder()
-            .ivf_pq_params(
+            .ivf_pq_with(
                 IvfPqGraphBuildParams::builder()
                     .n_lists(100)
                     .refinement_rate(3.0)

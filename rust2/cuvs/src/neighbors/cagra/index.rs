@@ -448,7 +448,7 @@ mod tests {
 
         let params = IndexParams::builder()
             .graph_degree(32)
-            .nn_descent_niter(20)
+            .nn_descent_with(20)
             .build()
             .unwrap();
 
