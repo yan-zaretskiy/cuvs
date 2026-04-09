@@ -10,3 +10,4 @@ pub mod cagra;
 pub mod filters;
 pub mod ivf_flat;
 pub mod ivf_pq;
+pub mod vamana;
