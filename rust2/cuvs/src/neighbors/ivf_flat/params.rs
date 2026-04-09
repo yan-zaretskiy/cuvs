@@ -41,7 +41,6 @@ impl IndexParams {
     #[builder]
     pub fn new(
         metric: Option<DistanceType>,
-        metric_arg: Option<f32>,
         n_lists: Option<u32>,
         kmeans_n_iters: Option<u32>,
         kmeans_trainset_fraction: Option<f64>,
@@ -70,9 +69,7 @@ impl IndexParams {
         unsafe {
             if let Some(v) = metric {
                 (*params.handle).metric = v.into();
-            }
-            if let Some(v) = metric_arg {
-                (*params.handle).metric_arg = v;
+                (*params.handle).metric_arg = v.metric_arg();
             }
             if let Some(v) = n_lists {
                 (*params.handle).n_lists = v;
@@ -181,6 +178,8 @@ impl Drop for SearchParams {
 
 #[cfg(test)]
 mod tests {
+    use ordered_float::OrderedFloat;
+
     use super::*;
 
     #[test]
@@ -208,5 +207,17 @@ mod tests {
     fn search_params_reject_zero_n_probes() {
         let err = SearchParams::builder().n_probes(0).build().unwrap_err();
         assert!(matches!(err, IvfFlatError::Validation(_)));
+    }
+
+    #[test]
+    fn lp_metric_sets_metric_arg_from_distance_type() {
+        let params = IndexParams::builder()
+            .metric(DistanceType::LpUnexpanded(OrderedFloat(3.0)))
+            .build()
+            .unwrap();
+        unsafe {
+            assert_eq!((*params.handle()).metric, ffi::cuvsDistanceType::LpUnexpanded);
+            assert_eq!((*params.handle()).metric_arg, 3.0);
+        }
     }
 }

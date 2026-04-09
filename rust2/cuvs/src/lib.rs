@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 
 use cuvs_sys as ffi;
 
+pub mod cluster;
 pub mod distance;
 pub mod dlpack;
 pub mod error;

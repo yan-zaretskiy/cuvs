@@ -49,7 +49,6 @@ impl<'d> Index<'d> {
         res: &Resources,
         dataset: &'d T,
         metric: DistanceType,
-        metric_arg: f32,
     ) -> Result<Self, BruteForceError> {
         let mut handle: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
         let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut handle) };
@@ -67,7 +66,7 @@ impl<'d> Index<'d> {
                 res.handle(),
                 dataset.ffi_ptr(),
                 metric.into(),
-                metric_arg,
+                metric.metric_arg(),
                 idx.handle,
             )
         };
@@ -196,7 +195,7 @@ mod tests {
         let res = Resources::new().unwrap();
 
         let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded, 0.0).unwrap();
+        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded).unwrap();
 
         let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
         let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
@@ -248,7 +247,7 @@ mod tests {
                 .unwrap();
         let dataset_view = cagra_index.dataset().unwrap();
 
-        let index = Index::build(&res, &dataset_view, DistanceType::L2Expanded, 0.0).unwrap();
+        let index = Index::build(&res, &dataset_view, DistanceType::L2Expanded).unwrap();
 
         let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
         let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
@@ -279,7 +278,7 @@ mod tests {
 
         let res = Resources::new().unwrap();
         let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded, 0.0).unwrap();
+        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded).unwrap();
 
         let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
         let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
@@ -308,7 +307,7 @@ mod tests {
 
         let res = Resources::new().unwrap();
         let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded, 0.0).unwrap();
+        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded).unwrap();
 
         let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
         let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();

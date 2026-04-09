@@ -5,6 +5,7 @@
 pub struct CUstream_st {
     _unused: [u8; 0],
 }
+#[doc = " CUDA stream"]
 pub type cudaStream_t = *mut CUstream_st;
 pub const cudaDataType_t_CUDA_R_16F: cudaDataType_t = 2;
 pub const cudaDataType_t_CUDA_C_16F: cudaDataType_t = 6;
@@ -35,7 +36,12 @@ pub const cudaDataType_t_CUDA_C_64I: cudaDataType_t = 25;
 pub const cudaDataType_t_CUDA_R_64U: cudaDataType_t = 26;
 pub const cudaDataType_t_CUDA_C_64U: cudaDataType_t = 27;
 pub const cudaDataType_t_CUDA_R_8F_E4M3: cudaDataType_t = 28;
+pub const cudaDataType_t_CUDA_R_8F_UE4M3: cudaDataType_t = 28;
 pub const cudaDataType_t_CUDA_R_8F_E5M2: cudaDataType_t = 29;
+pub const cudaDataType_t_CUDA_R_8F_UE8M0: cudaDataType_t = 30;
+pub const cudaDataType_t_CUDA_R_6F_E2M3: cudaDataType_t = 31;
+pub const cudaDataType_t_CUDA_R_6F_E3M2: cudaDataType_t = 32;
+pub const cudaDataType_t_CUDA_R_4F_E2M1: cudaDataType_t = 33;
 pub type cudaDataType_t = ::std::os::raw::c_uint;
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -423,15 +429,18 @@ pub struct cuvsKMeansParams {
     pub batch_samples: ::std::os::raw::c_int,
     #[doc = " if 0 then batch_centroids = n_clusters"]
     pub batch_centroids: ::std::os::raw::c_int,
+    #[doc = " Check inertia during iterations for early convergence."]
     pub inertia_check: bool,
     #[doc = " Whether to use hierarchical (balanced) kmeans or not"]
     pub hierarchical: bool,
     #[doc = " For hierarchical k-means , defines the number of training iterations"]
     pub hierarchical_n_iters: ::std::os::raw::c_int,
+    #[doc = " Number of samples to process per GPU batch for the batched (host-data) API.\n When set to 0, defaults to n_samples (process all at once)."]
+    pub streaming_batch_size: i64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of cuvsKMeansParams"][::std::mem::size_of::<cuvsKMeansParams>() - 56usize];
+    ["Size of cuvsKMeansParams"][::std::mem::size_of::<cuvsKMeansParams>() - 64usize];
     ["Alignment of cuvsKMeansParams"][::std::mem::align_of::<cuvsKMeansParams>() - 8usize];
     ["Offset of field: cuvsKMeansParams::metric"]
         [::std::mem::offset_of!(cuvsKMeansParams, metric) - 0usize];
@@ -457,6 +466,8 @@ const _: () = {
         [::std::mem::offset_of!(cuvsKMeansParams, hierarchical) - 49usize];
     ["Offset of field: cuvsKMeansParams::hierarchical_n_iters"]
         [::std::mem::offset_of!(cuvsKMeansParams, hierarchical_n_iters) - 52usize];
+    ["Offset of field: cuvsKMeansParams::streaming_batch_size"]
+        [::std::mem::offset_of!(cuvsKMeansParams, streaming_batch_size) - 56usize];
 };
 pub type cuvsKMeansParams_t = *mut cuvsKMeansParams;
 unsafe extern "C" {
@@ -478,7 +489,7 @@ pub enum cuvsKMeansType {
 }
 unsafe extern "C" {
     #[must_use]
-    #[doc = " @brief Find clusters with k-means algorithm.\n\n   Initial centroids are chosen with k-means++ algorithm. Empty\n   clusters are reinitialized by choosing new centroids with\n   k-means++ algorithm.\n\n @param[in]     res           opaque C handle\n @param[in]     params        Parameters for KMeans model.\n @param[in]     X             Training instances to cluster. The data must\n                              be in row-major format.\n                              [dim = n_samples x n_features]\n @param[in]     sample_weight Optional weights for each observation in X.\n                              [len = n_samples]\n @param[inout]  centroids     [in] When init is InitMethod::Array, use\n                              centroids as the initial cluster centers.\n                              [out] The generated centroids from the\n                              kmeans algorithm are stored at the address\n                              pointed by 'centroids'.\n                              [dim = n_clusters x n_features]\n @param[out]    inertia       Sum of squared distances of samples to their\n                              closest cluster center.\n @param[out]    n_iter        Number of iterations run."]
+    #[doc = " @brief Find clusters with k-means algorithm.\n\n   Initial centroids are chosen with k-means++ algorithm. Empty\n   clusters are reinitialized by choosing new centroids with\n   k-means++ algorithm.\n\n   X may reside on either host (CPU) or device (GPU) memory.\n   When X is on the host the data is streamed to the GPU in\n   batches controlled by params->streaming_batch_size.\n\n @param[in]     res           opaque C handle\n @param[in]     params        Parameters for KMeans model.\n @param[in]     X             Training instances to cluster. The data must\n                              be in row-major format. May be on host or\n                              device memory.\n                              [dim = n_samples x n_features]\n @param[in]     sample_weight Optional weights for each observation in X.\n                              Must be on the same memory space as X.\n                              [len = n_samples]\n @param[inout]  centroids     [in] When init is InitMethod::Array, use\n                              centroids as the initial cluster centers.\n                              [out] The generated centroids from the\n                              kmeans algorithm are stored at the address\n                              pointed by 'centroids'. Must be on device.\n                              [dim = n_clusters x n_features]\n @param[out]    inertia       Sum of squared distances of samples to their\n                              closest cluster center.\n @param[out]    n_iter        Number of iterations run."]
     pub fn cuvsKMeansFit(
         res: cuvsResources_t,
         params: cuvsKMeansParams_t,
@@ -2302,6 +2313,529 @@ unsafe extern "C" {
         dim: ::std::os::raw::c_int,
         metric: cuvsDistanceType,
         index: cuvsHnswIndex_t,
+    ) -> cuvsError_t;
+}
+#[repr(u32)]
+#[doc = " @brief Distribution mode for multi-GPU indexes"]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum cuvsMultiGpuDistributionMode {
+    #[doc = " Index is replicated on each device, favors throughput"]
+    CUVS_NEIGHBORS_MG_REPLICATED = 0,
+    #[doc = " Index is split on several devices, favors scaling"]
+    CUVS_NEIGHBORS_MG_SHARDED = 1,
+}
+#[repr(u32)]
+#[doc = " @brief Search mode when using a replicated index"]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum cuvsMultiGpuReplicatedSearchMode {
+    #[doc = " Search queries are split to maintain equal load on GPUs"]
+    CUVS_NEIGHBORS_MG_LOAD_BALANCER = 0,
+    #[doc = " Each search query is processed by a single GPU in a round-robin fashion"]
+    CUVS_NEIGHBORS_MG_ROUND_ROBIN = 1,
+}
+#[repr(u32)]
+#[doc = " @brief Merge mode when using a sharded index"]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum cuvsMultiGpuShardedMergeMode {
+    #[doc = " Search batches are merged on the root rank"]
+    CUVS_NEIGHBORS_MG_MERGE_ON_ROOT_RANK = 0,
+    #[doc = " Search batches are merged in a tree reduction fashion"]
+    CUVS_NEIGHBORS_MG_TREE_MERGE = 1,
+}
+#[doc = " @brief Multi-GPU parameters to build CAGRA Index\n\n This structure extends the base CAGRA index parameters with multi-GPU specific settings."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuCagraIndexParams {
+    #[doc = " Base CAGRA index parameters"]
+    pub base_params: cuvsCagraIndexParams_t,
+    #[doc = " Distribution mode for multi-GPU setup"]
+    pub mode: cuvsMultiGpuDistributionMode,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuCagraIndexParams"]
+        [::std::mem::size_of::<cuvsMultiGpuCagraIndexParams>() - 16usize];
+    ["Alignment of cuvsMultiGpuCagraIndexParams"]
+        [::std::mem::align_of::<cuvsMultiGpuCagraIndexParams>() - 8usize];
+    ["Offset of field: cuvsMultiGpuCagraIndexParams::base_params"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraIndexParams, base_params) - 0usize];
+    ["Offset of field: cuvsMultiGpuCagraIndexParams::mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraIndexParams, mode) - 8usize];
+};
+pub type cuvsMultiGpuCagraIndexParams_t = *mut cuvsMultiGpuCagraIndexParams;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU CAGRA Index params, and populate with default values\n\n @param[in] index_params cuvsMultiGpuCagraIndexParams_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraIndexParamsCreate(
+        index_params: *mut cuvsMultiGpuCagraIndexParams_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU CAGRA Index params\n\n @param[in] index_params\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraIndexParamsDestroy(
+        index_params: cuvsMultiGpuCagraIndexParams_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Multi-GPU parameters to search CAGRA index\n\n This structure extends the base CAGRA search parameters with multi-GPU specific settings."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuCagraSearchParams {
+    #[doc = " Base CAGRA search parameters"]
+    pub base_params: cuvsCagraSearchParams_t,
+    #[doc = " Replicated search mode"]
+    pub search_mode: cuvsMultiGpuReplicatedSearchMode,
+    #[doc = " Sharded merge mode"]
+    pub merge_mode: cuvsMultiGpuShardedMergeMode,
+    #[doc = " Number of rows per batch"]
+    pub n_rows_per_batch: i64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuCagraSearchParams"]
+        [::std::mem::size_of::<cuvsMultiGpuCagraSearchParams>() - 24usize];
+    ["Alignment of cuvsMultiGpuCagraSearchParams"]
+        [::std::mem::align_of::<cuvsMultiGpuCagraSearchParams>() - 8usize];
+    ["Offset of field: cuvsMultiGpuCagraSearchParams::base_params"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraSearchParams, base_params) - 0usize];
+    ["Offset of field: cuvsMultiGpuCagraSearchParams::search_mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraSearchParams, search_mode) - 8usize];
+    ["Offset of field: cuvsMultiGpuCagraSearchParams::merge_mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraSearchParams, merge_mode) - 12usize];
+    ["Offset of field: cuvsMultiGpuCagraSearchParams::n_rows_per_batch"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraSearchParams, n_rows_per_batch) - 16usize];
+};
+pub type cuvsMultiGpuCagraSearchParams_t = *mut cuvsMultiGpuCagraSearchParams;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU CAGRA search params, and populate with default values\n\n @param[in] params cuvsMultiGpuCagraSearchParams_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraSearchParamsCreate(
+        params: *mut cuvsMultiGpuCagraSearchParams_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU CAGRA search params\n\n @param[in] params\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraSearchParamsDestroy(
+        params: cuvsMultiGpuCagraSearchParams_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Struct to hold address of cuvs::neighbors::mg_index<cagra::index> and its active trained\n dtype"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuCagraIndex {
+    pub addr: usize,
+    pub dtype: DLDataType,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuCagraIndex"][::std::mem::size_of::<cuvsMultiGpuCagraIndex>() - 16usize];
+    ["Alignment of cuvsMultiGpuCagraIndex"]
+        [::std::mem::align_of::<cuvsMultiGpuCagraIndex>() - 8usize];
+    ["Offset of field: cuvsMultiGpuCagraIndex::addr"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraIndex, addr) - 0usize];
+    ["Offset of field: cuvsMultiGpuCagraIndex::dtype"]
+        [::std::mem::offset_of!(cuvsMultiGpuCagraIndex, dtype) - 8usize];
+};
+pub type cuvsMultiGpuCagraIndex_t = *mut cuvsMultiGpuCagraIndex;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU CAGRA index\n\n @param[in] index cuvsMultiGpuCagraIndex_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraIndexCreate(index: *mut cuvsMultiGpuCagraIndex_t) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU CAGRA index\n\n @param[in] index cuvsMultiGpuCagraIndex_t to de-allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraIndexDestroy(index: cuvsMultiGpuCagraIndex_t) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Build a Multi-GPU CAGRA index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] params Multi-GPU CAGRA index parameters\n @param[in] dataset_tensor DLManagedTensor* training dataset\n @param[out] index Multi-GPU CAGRA index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraBuild(
+        res: cuvsResources_t,
+        params: cuvsMultiGpuCagraIndexParams_t,
+        dataset_tensor: *mut DLManagedTensor,
+        index: cuvsMultiGpuCagraIndex_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Search a Multi-GPU CAGRA index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] params Multi-GPU CAGRA search parameters\n @param[in] index Multi-GPU CAGRA index\n @param[in] queries_tensor DLManagedTensor* queries dataset\n @param[out] neighbors_tensor DLManagedTensor* output neighbors\n @param[out] distances_tensor DLManagedTensor* output distances\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraSearch(
+        res: cuvsResources_t,
+        params: cuvsMultiGpuCagraSearchParams_t,
+        index: cuvsMultiGpuCagraIndex_t,
+        queries_tensor: *mut DLManagedTensor,
+        neighbors_tensor: *mut DLManagedTensor,
+        distances_tensor: *mut DLManagedTensor,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Extend a Multi-GPU CAGRA index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in,out] index Multi-GPU CAGRA index to extend\n @param[in] new_vectors_tensor DLManagedTensor* new vectors to add\n @param[in] new_indices_tensor DLManagedTensor* new indices (optional, can be NULL)\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraExtend(
+        res: cuvsResources_t,
+        index: cuvsMultiGpuCagraIndex_t,
+        new_vectors_tensor: *mut DLManagedTensor,
+        new_indices_tensor: *mut DLManagedTensor,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Serialize a Multi-GPU CAGRA index to file\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] index Multi-GPU CAGRA index to serialize\n @param[in] filename Path to the output file\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraSerialize(
+        res: cuvsResources_t,
+        index: cuvsMultiGpuCagraIndex_t,
+        filename: *const ::std::os::raw::c_char,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Deserialize a Multi-GPU CAGRA index from file\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] filename Path to the input file\n @param[out] index Multi-GPU CAGRA index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraDeserialize(
+        res: cuvsResources_t,
+        filename: *const ::std::os::raw::c_char,
+        index: cuvsMultiGpuCagraIndex_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Distribute a local CAGRA index to create a Multi-GPU index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] filename Path to the local index file\n @param[out] index Multi-GPU CAGRA index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuCagraDistribute(
+        res: cuvsResources_t,
+        filename: *const ::std::os::raw::c_char,
+        index: cuvsMultiGpuCagraIndex_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Multi-GPU parameters to build IVF-Flat Index\n\n This structure extends the base IVF-Flat index parameters with multi-GPU specific settings."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuIvfFlatIndexParams {
+    #[doc = " Base IVF-Flat index parameters"]
+    pub base_params: cuvsIvfFlatIndexParams_t,
+    #[doc = " Distribution mode for multi-GPU setup"]
+    pub mode: cuvsMultiGpuDistributionMode,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuIvfFlatIndexParams"]
+        [::std::mem::size_of::<cuvsMultiGpuIvfFlatIndexParams>() - 16usize];
+    ["Alignment of cuvsMultiGpuIvfFlatIndexParams"]
+        [::std::mem::align_of::<cuvsMultiGpuIvfFlatIndexParams>() - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatIndexParams::base_params"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatIndexParams, base_params) - 0usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatIndexParams::mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatIndexParams, mode) - 8usize];
+};
+pub type cuvsMultiGpuIvfFlatIndexParams_t = *mut cuvsMultiGpuIvfFlatIndexParams;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU IVF-Flat Index params, and populate with default values\n\n @param[in] index_params cuvsMultiGpuIvfFlatIndexParams_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatIndexParamsCreate(
+        index_params: *mut cuvsMultiGpuIvfFlatIndexParams_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU IVF-Flat Index params\n\n @param[in] index_params\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatIndexParamsDestroy(
+        index_params: cuvsMultiGpuIvfFlatIndexParams_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Multi-GPU parameters to search IVF-Flat index\n\n This structure extends the base IVF-Flat search parameters with multi-GPU specific settings."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuIvfFlatSearchParams {
+    #[doc = " Base IVF-Flat search parameters"]
+    pub base_params: cuvsIvfFlatSearchParams_t,
+    #[doc = " Replicated search mode"]
+    pub search_mode: cuvsMultiGpuReplicatedSearchMode,
+    #[doc = " Sharded merge mode"]
+    pub merge_mode: cuvsMultiGpuShardedMergeMode,
+    #[doc = " Number of rows per batch"]
+    pub n_rows_per_batch: i64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuIvfFlatSearchParams"]
+        [::std::mem::size_of::<cuvsMultiGpuIvfFlatSearchParams>() - 24usize];
+    ["Alignment of cuvsMultiGpuIvfFlatSearchParams"]
+        [::std::mem::align_of::<cuvsMultiGpuIvfFlatSearchParams>() - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatSearchParams::base_params"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatSearchParams, base_params) - 0usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatSearchParams::search_mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatSearchParams, search_mode) - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatSearchParams::merge_mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatSearchParams, merge_mode) - 12usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatSearchParams::n_rows_per_batch"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatSearchParams, n_rows_per_batch) - 16usize];
+};
+pub type cuvsMultiGpuIvfFlatSearchParams_t = *mut cuvsMultiGpuIvfFlatSearchParams;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU IVF-Flat search params, and populate with default values\n\n @param[in] params cuvsMultiGpuIvfFlatSearchParams_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatSearchParamsCreate(
+        params: *mut cuvsMultiGpuIvfFlatSearchParams_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU IVF-Flat search params\n\n @param[in] params\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatSearchParamsDestroy(
+        params: cuvsMultiGpuIvfFlatSearchParams_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Struct to hold address of cuvs::neighbors::mg_index<ivf_flat::index> and its active\n trained dtype"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuIvfFlatIndex {
+    pub addr: usize,
+    pub dtype: DLDataType,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuIvfFlatIndex"]
+        [::std::mem::size_of::<cuvsMultiGpuIvfFlatIndex>() - 16usize];
+    ["Alignment of cuvsMultiGpuIvfFlatIndex"]
+        [::std::mem::align_of::<cuvsMultiGpuIvfFlatIndex>() - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatIndex::addr"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatIndex, addr) - 0usize];
+    ["Offset of field: cuvsMultiGpuIvfFlatIndex::dtype"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfFlatIndex, dtype) - 8usize];
+};
+pub type cuvsMultiGpuIvfFlatIndex_t = *mut cuvsMultiGpuIvfFlatIndex;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU IVF-Flat index\n\n @param[in] index cuvsMultiGpuIvfFlatIndex_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatIndexCreate(index: *mut cuvsMultiGpuIvfFlatIndex_t) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU IVF-Flat index\n\n @param[in] index cuvsMultiGpuIvfFlatIndex_t to de-allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatIndexDestroy(index: cuvsMultiGpuIvfFlatIndex_t) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Build a Multi-GPU IVF-Flat index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] params Multi-GPU IVF-Flat index parameters\n @param[in] dataset_tensor DLManagedTensor* training dataset\n @param[out] index Multi-GPU IVF-Flat index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatBuild(
+        res: cuvsResources_t,
+        params: cuvsMultiGpuIvfFlatIndexParams_t,
+        dataset_tensor: *mut DLManagedTensor,
+        index: cuvsMultiGpuIvfFlatIndex_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Search a Multi-GPU IVF-Flat index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] params Multi-GPU IVF-Flat search parameters\n @param[in] index Multi-GPU IVF-Flat index\n @param[in] queries_tensor DLManagedTensor* queries dataset\n @param[out] neighbors_tensor DLManagedTensor* output neighbors\n @param[out] distances_tensor DLManagedTensor* output distances\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatSearch(
+        res: cuvsResources_t,
+        params: cuvsMultiGpuIvfFlatSearchParams_t,
+        index: cuvsMultiGpuIvfFlatIndex_t,
+        queries_tensor: *mut DLManagedTensor,
+        neighbors_tensor: *mut DLManagedTensor,
+        distances_tensor: *mut DLManagedTensor,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Extend a Multi-GPU IVF-Flat index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in,out] index Multi-GPU IVF-Flat index to extend\n @param[in] new_vectors_tensor DLManagedTensor* new vectors to add\n @param[in] new_indices_tensor DLManagedTensor* new indices (optional, can be NULL)\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatExtend(
+        res: cuvsResources_t,
+        index: cuvsMultiGpuIvfFlatIndex_t,
+        new_vectors_tensor: *mut DLManagedTensor,
+        new_indices_tensor: *mut DLManagedTensor,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Serialize a Multi-GPU IVF-Flat index to file\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] index Multi-GPU IVF-Flat index to serialize\n @param[in] filename Path to the output file\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatSerialize(
+        res: cuvsResources_t,
+        index: cuvsMultiGpuIvfFlatIndex_t,
+        filename: *const ::std::os::raw::c_char,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Deserialize a Multi-GPU IVF-Flat index from file\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] filename Path to the input file\n @param[out] index Multi-GPU IVF-Flat index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatDeserialize(
+        res: cuvsResources_t,
+        filename: *const ::std::os::raw::c_char,
+        index: cuvsMultiGpuIvfFlatIndex_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Distribute a local IVF-Flat index to create a Multi-GPU index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] filename Path to the local index file\n @param[out] index Multi-GPU IVF-Flat index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfFlatDistribute(
+        res: cuvsResources_t,
+        filename: *const ::std::os::raw::c_char,
+        index: cuvsMultiGpuIvfFlatIndex_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Multi-GPU parameters to build IVF-PQ Index\n\n This structure extends the base IVF-PQ index parameters with multi-GPU specific settings."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuIvfPqIndexParams {
+    #[doc = " Base IVF-PQ index parameters"]
+    pub base_params: cuvsIvfPqIndexParams_t,
+    #[doc = " Distribution mode for multi-GPU setup"]
+    pub mode: cuvsMultiGpuDistributionMode,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuIvfPqIndexParams"]
+        [::std::mem::size_of::<cuvsMultiGpuIvfPqIndexParams>() - 16usize];
+    ["Alignment of cuvsMultiGpuIvfPqIndexParams"]
+        [::std::mem::align_of::<cuvsMultiGpuIvfPqIndexParams>() - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfPqIndexParams::base_params"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqIndexParams, base_params) - 0usize];
+    ["Offset of field: cuvsMultiGpuIvfPqIndexParams::mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqIndexParams, mode) - 8usize];
+};
+pub type cuvsMultiGpuIvfPqIndexParams_t = *mut cuvsMultiGpuIvfPqIndexParams;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU IVF-PQ Index params, and populate with default values\n\n @param[in] index_params cuvsMultiGpuIvfPqIndexParams_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqIndexParamsCreate(
+        index_params: *mut cuvsMultiGpuIvfPqIndexParams_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU IVF-PQ Index params\n\n @param[in] index_params\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqIndexParamsDestroy(
+        index_params: cuvsMultiGpuIvfPqIndexParams_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Multi-GPU parameters to search IVF-PQ index\n\n This structure extends the base IVF-PQ search parameters with multi-GPU specific settings."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuIvfPqSearchParams {
+    #[doc = " Base IVF-PQ search parameters"]
+    pub base_params: cuvsIvfPqSearchParams_t,
+    #[doc = " Replicated search mode"]
+    pub search_mode: cuvsMultiGpuReplicatedSearchMode,
+    #[doc = " Sharded merge mode"]
+    pub merge_mode: cuvsMultiGpuShardedMergeMode,
+    #[doc = " Number of rows per batch"]
+    pub n_rows_per_batch: i64,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuIvfPqSearchParams"]
+        [::std::mem::size_of::<cuvsMultiGpuIvfPqSearchParams>() - 24usize];
+    ["Alignment of cuvsMultiGpuIvfPqSearchParams"]
+        [::std::mem::align_of::<cuvsMultiGpuIvfPqSearchParams>() - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfPqSearchParams::base_params"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqSearchParams, base_params) - 0usize];
+    ["Offset of field: cuvsMultiGpuIvfPqSearchParams::search_mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqSearchParams, search_mode) - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfPqSearchParams::merge_mode"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqSearchParams, merge_mode) - 12usize];
+    ["Offset of field: cuvsMultiGpuIvfPqSearchParams::n_rows_per_batch"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqSearchParams, n_rows_per_batch) - 16usize];
+};
+pub type cuvsMultiGpuIvfPqSearchParams_t = *mut cuvsMultiGpuIvfPqSearchParams;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU IVF-PQ search params, and populate with default values\n\n @param[in] params cuvsMultiGpuIvfPqSearchParams_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqSearchParamsCreate(
+        params: *mut cuvsMultiGpuIvfPqSearchParams_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU IVF-PQ search params\n\n @param[in] params\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqSearchParamsDestroy(
+        params: cuvsMultiGpuIvfPqSearchParams_t,
+    ) -> cuvsError_t;
+}
+#[doc = " @brief Struct to hold address of cuvs::neighbors::mg_index<ivf_pq::index> and its active trained\n dtype"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct cuvsMultiGpuIvfPqIndex {
+    pub addr: usize,
+    pub dtype: DLDataType,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of cuvsMultiGpuIvfPqIndex"][::std::mem::size_of::<cuvsMultiGpuIvfPqIndex>() - 16usize];
+    ["Alignment of cuvsMultiGpuIvfPqIndex"]
+        [::std::mem::align_of::<cuvsMultiGpuIvfPqIndex>() - 8usize];
+    ["Offset of field: cuvsMultiGpuIvfPqIndex::addr"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqIndex, addr) - 0usize];
+    ["Offset of field: cuvsMultiGpuIvfPqIndex::dtype"]
+        [::std::mem::offset_of!(cuvsMultiGpuIvfPqIndex, dtype) - 8usize];
+};
+pub type cuvsMultiGpuIvfPqIndex_t = *mut cuvsMultiGpuIvfPqIndex;
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Allocate Multi-GPU IVF-PQ index\n\n @param[in] index cuvsMultiGpuIvfPqIndex_t to allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqIndexCreate(index: *mut cuvsMultiGpuIvfPqIndex_t) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief De-allocate Multi-GPU IVF-PQ index\n\n @param[in] index cuvsMultiGpuIvfPqIndex_t to de-allocate\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqIndexDestroy(index: cuvsMultiGpuIvfPqIndex_t) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Build a Multi-GPU IVF-PQ index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] params Multi-GPU IVF-PQ index parameters\n @param[in] dataset_tensor DLManagedTensor* training dataset\n @param[out] index Multi-GPU IVF-PQ index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqBuild(
+        res: cuvsResources_t,
+        params: cuvsMultiGpuIvfPqIndexParams_t,
+        dataset_tensor: *mut DLManagedTensor,
+        index: cuvsMultiGpuIvfPqIndex_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Search a Multi-GPU IVF-PQ index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] params Multi-GPU IVF-PQ search parameters\n @param[in] index Multi-GPU IVF-PQ index\n @param[in] queries_tensor DLManagedTensor* queries dataset\n @param[out] neighbors_tensor DLManagedTensor* output neighbors\n @param[out] distances_tensor DLManagedTensor* output distances\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqSearch(
+        res: cuvsResources_t,
+        params: cuvsMultiGpuIvfPqSearchParams_t,
+        index: cuvsMultiGpuIvfPqIndex_t,
+        queries_tensor: *mut DLManagedTensor,
+        neighbors_tensor: *mut DLManagedTensor,
+        distances_tensor: *mut DLManagedTensor,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Extend a Multi-GPU IVF-PQ index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in,out] index Multi-GPU IVF-PQ index to extend\n @param[in] new_vectors_tensor DLManagedTensor* new vectors to add\n @param[in] new_indices_tensor DLManagedTensor* new indices (optional, can be NULL)\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqExtend(
+        res: cuvsResources_t,
+        index: cuvsMultiGpuIvfPqIndex_t,
+        new_vectors_tensor: *mut DLManagedTensor,
+        new_indices_tensor: *mut DLManagedTensor,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Serialize a Multi-GPU IVF-PQ index to file\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] index Multi-GPU IVF-PQ index to serialize\n @param[in] filename Path to the output file\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqSerialize(
+        res: cuvsResources_t,
+        index: cuvsMultiGpuIvfPqIndex_t,
+        filename: *const ::std::os::raw::c_char,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Deserialize a Multi-GPU IVF-PQ index from file\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] filename Path to the input file\n @param[out] index Multi-GPU IVF-PQ index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqDeserialize(
+        res: cuvsResources_t,
+        filename: *const ::std::os::raw::c_char,
+        index: cuvsMultiGpuIvfPqIndex_t,
+    ) -> cuvsError_t;
+}
+unsafe extern "C" {
+    #[must_use]
+    #[doc = " @brief Distribute a local IVF-PQ index to create a Multi-GPU index\n\n @param[in] res cuvsResources_t opaque C handle\n @param[in] filename Path to the local index file\n @param[out] index Multi-GPU IVF-PQ index\n @return cuvsError_t"]
+    pub fn cuvsMultiGpuIvfPqDistribute(
+        res: cuvsResources_t,
+        filename: *const ::std::os::raw::c_char,
+        index: cuvsMultiGpuIvfPqIndex_t,
     ) -> cuvsError_t;
 }
 #[repr(u32)]
