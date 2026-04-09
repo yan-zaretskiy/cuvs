@@ -9,13 +9,13 @@ use std::ffi::CString;
 use std::os::raw::c_int;
 use std::path::Path;
 
-use crate::dlpack::{AsDLTensor, DLTensorFfi};
+use crate::dlpack::IntoDlTensor;
 use crate::error::check_cuvs;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
-use super::params::IndexParams;
 use super::VamanaError;
+use super::params::IndexParams;
 
 /// A Vamana approximate nearest neighbor index.
 ///
@@ -39,14 +39,18 @@ impl Index {
     ///
     /// Supported dataset dtypes in the current C-backed implementation are
     /// `f32`, `i8`, and `u8`. Host and device datasets are both accepted.
-    pub fn build(
+    pub fn build<'a, D>(
         res: &Resources,
         params: &IndexParams,
-        dataset: &impl AsDLTensor,
-    ) -> Result<Self, VamanaError> {
+        dataset: D,
+    ) -> Result<Self, VamanaError>
+    where
+        D: IntoDlTensor<'a>,
+    {
+        let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
         let status = unsafe {
-            ffi::cuvsVamanaBuild(res.handle(), params.handle(), dataset.ffi_ptr(), idx.handle)
+            ffi::cuvsVamanaBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
         };
         check_cuvs(status)?;
         Ok(idx)
@@ -69,12 +73,7 @@ impl Index {
     ) -> Result<(), VamanaError> {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
         let status = unsafe {
-            ffi::cuvsVamanaSerialize(
-                res.handle(),
-                c_path.as_ptr(),
-                self.handle,
-                include_dataset,
-            )
+            ffi::cuvsVamanaSerialize(res.handle(), c_path.as_ptr(), self.handle, include_dataset)
         };
         check_cuvs(status)?;
         Ok(())
@@ -119,7 +118,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::dlpack::BorrowedDLTensor;
 
     const N_ROWS: i64 = 256;
     const DIM: i64 = 16;
@@ -129,24 +127,20 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "cuvs-rust-{name}-{}-{unique}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("cuvs-rust-{name}-{}-{unique}", std::process::id()))
     }
 
     #[test]
     fn build_and_dims() {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
 
         let params = IndexParams::builder()
             .graph_degree(32)
             .visited_size(64)
             .build()
             .unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
     }
@@ -155,14 +149,13 @@ mod tests {
     fn serialize_writes_prefix_and_dataset_file() {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
 
         let params = IndexParams::builder()
             .graph_degree(32)
             .visited_size(64)
             .build()
             .unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let prefix = temp_prefix("vamana");
         index.serialize(&res, &prefix, true).unwrap();

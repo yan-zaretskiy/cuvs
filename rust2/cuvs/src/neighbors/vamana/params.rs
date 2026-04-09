@@ -59,10 +59,7 @@ impl IndexParams {
         queue_size: Option<u32>,
         reverse_batchsize: Option<u32>,
     ) -> Result<Self, VamanaError> {
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsVamanaIndexParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         let effective_metric = metric.unwrap_or_else(|| unsafe { (*params.handle).metric.into() });
         let effective_graph_degree =
             graph_degree.unwrap_or_else(|| unsafe { (*params.handle).graph_degree });
@@ -137,6 +134,13 @@ impl IndexParams {
 }
 
 impl IndexParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, VamanaError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsVamanaIndexParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsVamanaIndexParams_t {
         self.handle
     }
@@ -170,6 +174,15 @@ mod tests {
     }
 
     #[test]
+    fn try_new_uses_library_defaults() {
+        let params = IndexParams::try_new().unwrap();
+        unsafe {
+            assert_eq!((*params.handle()).metric, ffi::cuvsDistanceType::L2Expanded);
+            assert!(SUPPORTED_GRAPH_DEGREES.contains(&(*params.handle()).graph_degree));
+        }
+    }
+
+    #[test]
     fn rejects_unsupported_graph_degree() {
         let err = IndexParams::builder().graph_degree(16).build().unwrap_err();
         assert!(matches!(err, VamanaError::Validation(_)));
@@ -187,7 +200,10 @@ mod tests {
 
     #[test]
     fn rejects_vamana_iters_below_one() {
-        let err = IndexParams::builder().vamana_iters(0.5).build().unwrap_err();
+        let err = IndexParams::builder()
+            .vamana_iters(0.5)
+            .build()
+            .unwrap_err();
         assert!(matches!(err, VamanaError::Validation(_)));
     }
 

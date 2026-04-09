@@ -62,10 +62,7 @@ impl IndexParams {
             )));
         }
 
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsIvfFlatIndexParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         unsafe {
             if let Some(v) = metric {
                 (*params.handle).metric = v.into();
@@ -96,6 +93,13 @@ impl IndexParams {
 }
 
 impl IndexParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, IvfFlatError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfFlatIndexParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsIvfFlatIndexParams_t {
         self.handle
     }
@@ -142,10 +146,7 @@ impl SearchParams {
             return Err(IvfFlatError::Validation("n_probes must be > 0".into()));
         }
 
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsIvfFlatSearchParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         unsafe {
             if let Some(v) = n_probes {
                 (*params.handle).n_probes = v;
@@ -157,6 +158,13 @@ impl SearchParams {
 }
 
 impl SearchParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, IvfFlatError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfFlatSearchParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsIvfFlatSearchParams_t {
         self.handle
     }
@@ -189,6 +197,15 @@ mod tests {
     }
 
     #[test]
+    fn index_params_try_new_uses_library_defaults() {
+        let params = IndexParams::try_new().unwrap();
+        unsafe {
+            assert_eq!((*params.handle()).metric, ffi::cuvsDistanceType::L2Expanded);
+            assert!((*params.handle()).n_lists > 0);
+        }
+    }
+
+    #[test]
     fn index_params_reject_out_of_range_trainset_fraction() {
         let err = IndexParams::builder()
             .kmeans_trainset_fraction(0.0)
@@ -210,13 +227,24 @@ mod tests {
     }
 
     #[test]
+    fn search_params_try_new_uses_library_defaults() {
+        let params = SearchParams::try_new().unwrap();
+        unsafe {
+            assert!((*params.handle()).n_probes > 0);
+        }
+    }
+
+    #[test]
     fn lp_metric_sets_metric_arg_from_distance_type() {
         let params = IndexParams::builder()
             .metric(DistanceType::LpUnexpanded(OrderedFloat(3.0)))
             .build()
             .unwrap();
         unsafe {
-            assert_eq!((*params.handle()).metric, ffi::cuvsDistanceType::LpUnexpanded);
+            assert_eq!(
+                (*params.handle()).metric,
+                ffi::cuvsDistanceType::LpUnexpanded
+            );
             assert_eq!((*params.handle()).metric_arg, 3.0);
         }
     }

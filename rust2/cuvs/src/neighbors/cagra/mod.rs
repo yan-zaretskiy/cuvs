@@ -18,6 +18,7 @@ pub use params::{
     AceParams, CompressionParams, ExtendParams, IndexParams, IvfPqGraphBuildParams, SearchParams,
 };
 
+use crate::dlpack::DLPackError;
 use crate::error::LibraryError;
 use crate::ffi;
 
@@ -177,6 +178,9 @@ pub enum CagraError {
     /// The C library reported a failure.
     #[error(transparent)]
     Library(#[from] LibraryError),
+    /// Tensor conversion into DLPack metadata failed.
+    #[error(transparent)]
+    DLPack(#[from] DLPackError),
     /// A file path contained an interior NUL byte.
     #[error("path contains interior NUL byte")]
     InvalidPath(#[from] std::ffi::NulError),

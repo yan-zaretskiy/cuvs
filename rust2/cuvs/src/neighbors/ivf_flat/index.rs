@@ -8,14 +8,17 @@
 use std::ffi::CString;
 use std::path::Path;
 
-use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi, ReturnedDLTensor};
+use crate::dlpack::{
+    DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut, ReturnedDLTensor,
+};
 use crate::error::check_cuvs;
 use crate::neighbors::filters::SearchFilter;
+use crate::neighbors::filters::no_filter;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
-use super::params::{IndexParams, SearchParams};
 use super::IvfFlatError;
+use super::params::{IndexParams, SearchParams};
 
 /// An IVF-Flat approximate nearest neighbor index.
 ///
@@ -39,20 +42,19 @@ impl Index {
     ///
     /// Supported dataset/query dtypes in the current C-backed implementation
     /// are `f32`, `f16`, `i8`, and `u8`.
-    pub fn build(
+    pub fn build<'a, D>(
         res: &Resources,
         params: &IndexParams,
-        dataset: &impl AsDLTensor,
-    ) -> Result<Self, IvfFlatError> {
+        dataset: D,
+    ) -> Result<Self, IvfFlatError>
+    where
+        D: IntoDlTensor<'a>,
+    {
+        let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
         let status = unsafe {
-            ffi::cuvsIvfFlatBuild(
-                res.handle(),
-                params.handle(),
-                dataset.ffi_ptr(),
-                idx.handle,
-            )
+            ffi::cuvsIvfFlatBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
         };
         check_cuvs(status)?;
         Ok(idx)
@@ -67,9 +69,8 @@ impl Index {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
         let idx = Self::create_handle()?;
 
-        let status = unsafe {
-            ffi::cuvsIvfFlatDeserialize(res.handle(), c_path.as_ptr(), idx.handle)
-        };
+        let status =
+            unsafe { ffi::cuvsIvfFlatDeserialize(res.handle(), c_path.as_ptr(), idx.handle) };
         check_cuvs(status)?;
         Ok(idx)
     }
@@ -84,33 +85,59 @@ impl Index {
     /// `distances` buffers. Queries must use the same dtype as the dataset
     /// used to build the index. In the current implementation, `neighbors`
     /// must be an `int64` tensor and `distances` must be `float32`.
-    pub fn search(
+    pub fn search<'q, 'n, 'dist, Q, N, Dist>(
         &self,
         res: &Resources,
         params: &SearchParams,
-        queries: &impl AsDLTensor,
-        neighbors: &impl AsMutDLTensor,
-        distances: &impl AsMutDLTensor,
-        filter: &SearchFilter<'_>,
-    ) -> Result<(), IvfFlatError> {
+        queries: Q,
+        neighbors: N,
+        distances: Dist,
+    ) -> Result<(), IvfFlatError>
+    where
+        Q: IntoDlTensor<'q>,
+        N: IntoDlTensorMut<'n>,
+        Dist: IntoDlTensorMut<'dist>,
+    {
+        let queries = queries.into_dl_tensor()?;
+        let neighbors = neighbors.into_dl_tensor_mut()?;
+        let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = unsafe { (*queries.as_dl_tensor()).dl_tensor.dtype };
+        let query_dtype = queries.dl_tensor().dtype;
+        Self::validate_query_dtype(index_dtype, query_dtype)?;
+        self.search_impl(res, params, &queries, &neighbors, &distances, no_filter())
+    }
+
+    /// Search the index for approximate nearest neighbors with a row filter.
+    pub fn search_filtered<'q, 'n, 'dist, Q, N, Dist>(
+        &self,
+        res: &Resources,
+        params: &SearchParams,
+        queries: Q,
+        neighbors: N,
+        distances: Dist,
+        filter: &SearchFilter<'_>,
+    ) -> Result<(), IvfFlatError>
+    where
+        Q: IntoDlTensor<'q>,
+        N: IntoDlTensorMut<'n>,
+        Dist: IntoDlTensorMut<'dist>,
+    {
+        let queries = queries.into_dl_tensor()?;
+        let neighbors = neighbors.into_dl_tensor_mut()?;
+        let distances = distances.into_dl_tensor_mut()?;
+        let index_dtype = unsafe { (*self.handle).dtype };
+        let query_dtype = queries.dl_tensor().dtype;
         Self::validate_query_dtype(index_dtype, query_dtype)?;
         Self::validate_filter_support(filter)?;
 
-        let status = unsafe {
-            ffi::cuvsIvfFlatSearch(
-                res.handle(),
-                params.handle(),
-                self.handle,
-                queries.ffi_ptr(),
-                neighbors.ffi_ptr(),
-                distances.ffi_ptr(),
-                filter.as_cuvs_filter(),
-            )
-        };
-        check_cuvs(status)?;
-        Ok(())
+        self.search_impl(
+            res,
+            params,
+            &queries,
+            &neighbors,
+            &distances,
+            filter.as_cuvs_filter(),
+        )
     }
 
     // -----------------------------------------------------------------
@@ -126,17 +153,23 @@ impl Index {
     ///
     /// When the index was built with `adaptive_centers = true`, extending the
     /// index updates cluster centers to reflect the newly added data.
-    pub fn extend(
+    pub fn extend<'vectors, 'indices, V, I>(
         &mut self,
         res: &Resources,
-        new_vectors: &impl AsDLTensor,
-        new_indices: &impl AsDLTensor,
-    ) -> Result<(), IvfFlatError> {
+        new_vectors: V,
+        new_indices: I,
+    ) -> Result<(), IvfFlatError>
+    where
+        V: IntoDlTensor<'vectors>,
+        I: IntoDlTensor<'indices>,
+    {
+        let new_vectors = new_vectors.into_dl_tensor()?;
+        let new_indices = new_indices.into_dl_tensor()?;
         let status = unsafe {
             ffi::cuvsIvfFlatExtend(
                 res.handle(),
-                new_vectors.ffi_ptr(),
-                new_indices.ffi_ptr(),
+                new_vectors.as_ptr(),
+                new_indices.as_ptr(),
                 self.handle,
             )
         };
@@ -154,9 +187,8 @@ impl Index {
     /// subject to change across cuVS releases.
     pub fn serialize(&self, res: &Resources, path: impl AsRef<Path>) -> Result<(), IvfFlatError> {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
-        let status = unsafe {
-            ffi::cuvsIvfFlatSerialize(res.handle(), c_path.as_ptr(), self.handle)
-        };
+        let status =
+            unsafe { ffi::cuvsIvfFlatSerialize(res.handle(), c_path.as_ptr(), self.handle) };
         check_cuvs(status)?;
         Ok(())
     }
@@ -223,6 +255,30 @@ impl Index {
             _not_send: std::marker::PhantomData,
         })
     }
+
+    fn search_impl(
+        &self,
+        res: &Resources,
+        params: &SearchParams,
+        queries: &DLTensorView<'_>,
+        neighbors: &DLTensorViewMut<'_>,
+        distances: &DLTensorViewMut<'_>,
+        filter: ffi::cuvsFilter,
+    ) -> Result<(), IvfFlatError> {
+        let status = unsafe {
+            ffi::cuvsIvfFlatSearch(
+                res.handle(),
+                params.handle(),
+                self.handle,
+                queries.as_ptr(),
+                neighbors.as_ptr(),
+                distances.as_ptr(),
+                filter,
+            )
+        };
+        check_cuvs(status)?;
+        Ok(())
+    }
 }
 
 impl Drop for Index {
@@ -241,7 +297,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
+    use crate::dlpack::{DLTensorView, DLTensorViewMut};
     use crate::neighbors::filters::{Bitmap, Bitset, Filter, SearchFilter};
     use crate::resources::Resources;
 
@@ -262,25 +318,19 @@ mod tests {
         let distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let queries_dl = BorrowedDLTensor::try_from(queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        let queries_dl = DLTensorView::try_from(queries).unwrap();
+        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
+        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
 
         index
-            .search(
-                res,
-                search_params,
-                &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
-                &SearchFilter::None,
-            )
+            .search(res, search_params, &queries_dl, neighbors_dl, distances_dl)
             .unwrap();
 
-        let n_elements = (N_QUERIES * K) as usize;
-        let mut buf = vec![0i64; n_elements];
-        neighbors.copy_data(&mut buf, n_elements);
-        buf
+        Vec::<Vec<i64>>::try_from(&neighbors)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     fn assert_indices_in_range(indices: &[i64], upper: i64) {
@@ -311,11 +361,10 @@ mod tests {
     #[test]
     fn build_and_search() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
@@ -331,11 +380,10 @@ mod tests {
     #[test]
     fn build_and_search_with_default_builders() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
@@ -356,7 +404,7 @@ mod tests {
         let index = {
             let dataset =
                 tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-            let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+            let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
             Index::build(&res, &params, &dataset_dl).unwrap()
         };
 
@@ -370,11 +418,10 @@ mod tests {
     #[test]
     fn serialize_round_trip() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let path = temp_path("ivf-flat-roundtrip");
@@ -395,12 +442,11 @@ mod tests {
     #[test]
     fn centers_accessor() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let n_lists = 16u32;
         let params = IndexParams::builder().n_lists(n_lists).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let centers = index.centers().unwrap();
@@ -413,7 +459,7 @@ mod tests {
 
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let mut index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let new_vectors =
@@ -423,8 +469,8 @@ mod tests {
             N_ROWS + EXTRA_ROWS,
             (tch::Kind::Int64, tch::Device::Cuda(0)),
         );
-        let new_vectors_dl = BorrowedDLTensor::try_from(&new_vectors).unwrap();
-        let new_indices_dl = BorrowedDLTensor::try_from(&new_indices).unwrap();
+        let new_vectors_dl = DLTensorView::try_from(&new_vectors).unwrap();
+        let new_indices_dl = DLTensorView::try_from(&new_indices).unwrap();
         index
             .extend(&res, &new_vectors_dl, &new_indices_dl)
             .unwrap();
@@ -451,35 +497,33 @@ mod tests {
         let bitset = tch::Tensor::from_slice(&[0b0110i32]).to(tch::Device::Cuda(0));
 
         let params = IndexParams::builder().n_lists(2).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
-        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        let queries_dl = DLTensorView::try_from(&queries).unwrap();
+        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
+        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
 
         index
-            .search(
+            .search_filtered(
                 &res,
                 &SearchParams::builder().n_probes(2).build().unwrap(),
                 &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
+                neighbors_dl,
+                distances_dl,
                 &SearchFilter::Bitset(Filter::<Bitset>::new(&bitset).unwrap()),
             )
             .unwrap();
 
-        let mut buf = vec![0i64; 2];
-        neighbors.copy_data(&mut buf, 2);
-        assert_eq!(buf, vec![1, 2]);
+        let buf: Vec<Vec<i64>> = Vec::try_from(&neighbors).unwrap();
+        assert_eq!(buf, vec![vec![1], vec![2]]);
     }
 
     #[test]
     fn search_with_bitmap_filter_returns_validation_error() {
         let res = Resources::new().unwrap();
 
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let neighbors =
@@ -489,20 +533,20 @@ mod tests {
         let bitmap = tch::Tensor::from_slice(&[0b1111i32]).to(tch::Device::Cuda(0));
 
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
-        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        let queries_dl = DLTensorView::try_from(&queries).unwrap();
+        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
+        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
 
         let err = index
-            .search(
+            .search_filtered(
                 &res,
                 &SearchParams::builder().n_probes(16).build().unwrap(),
                 &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
+                neighbors_dl,
+                distances_dl,
                 &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
             )
             .unwrap_err();

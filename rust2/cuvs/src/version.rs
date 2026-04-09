@@ -5,8 +5,8 @@
 
 //! cuVS library version query.
 
-use crate::ffi;
 use crate::error::{LibraryError, check_cuvs};
+use crate::ffi;
 
 /// Returns the cuVS library version as `(major, minor, patch)`.
 pub fn version() -> Result<(u16, u16, u16), LibraryError> {

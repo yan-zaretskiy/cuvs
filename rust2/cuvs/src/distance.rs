@@ -7,7 +7,7 @@
 
 use ordered_float::OrderedFloat;
 
-use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi};
+use crate::dlpack::{DLPackError, IntoDlTensor, IntoDlTensorMut};
 use crate::error::{LibraryError, check_cuvs};
 use crate::ffi;
 use crate::resources::Resources;
@@ -133,6 +133,17 @@ impl From<ffi::cuvsDistanceType> for DistanceType {
     }
 }
 
+/// Error type for pairwise distance operations.
+#[derive(Debug, thiserror::Error)]
+pub enum DistanceError {
+    /// The C library reported a failure.
+    #[error(transparent)]
+    Library(#[from] LibraryError),
+    /// Tensor conversion into DLPack metadata failed.
+    #[error(transparent)]
+    DLPack(#[from] DLPackError),
+}
+
 /// Fills `distances` with pairwise distances between rows of `x` and rows of `y`.
 ///
 /// The C API expects `x` as `[n, k]`, `y` as `[m, k]`, and `distances` as a
@@ -140,19 +151,27 @@ impl From<ffi::cuvsDistanceType> for DistanceType {
 /// and dtypes must match what cuVS supports for the chosen [`DistanceType`].
 /// Use [`DistanceType::LpUnexpanded`] to provide the Minkowski exponent `p`;
 /// all other metrics use the C API default argument of `2.0`.
-pub fn pairwise_distance(
+pub fn pairwise_distance<'x, 'y, 'd, X, Y, Dist>(
     res: &Resources,
-    x: &impl AsDLTensor,
-    y: &impl AsDLTensor,
-    distances: &impl AsMutDLTensor,
+    x: X,
+    y: Y,
+    distances: Dist,
     metric: DistanceType,
-) -> Result<(), LibraryError> {
+) -> Result<(), DistanceError>
+where
+    X: IntoDlTensor<'x>,
+    Y: IntoDlTensor<'y>,
+    Dist: IntoDlTensorMut<'d>,
+{
+    let x = x.into_dl_tensor()?;
+    let y = y.into_dl_tensor()?;
+    let distances = distances.into_dl_tensor_mut()?;
     let status = unsafe {
         ffi::cuvsPairwiseDistance(
             res.handle(),
-            x.ffi_ptr(),
-            y.ffi_ptr(),
-            distances.ffi_ptr(),
+            x.as_ptr(),
+            y.as_ptr(),
+            distances.as_ptr(),
             metric.into(),
             metric.metric_arg(),
         )
@@ -166,7 +185,6 @@ mod tests {
     use ordered_float::OrderedFloat;
 
     use super::*;
-    use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
     use crate::resources::Resources;
 
     #[test]
@@ -176,35 +194,24 @@ mod tests {
         let k = 8i64;
         let x = tch::Tensor::randn([n, k], (tch::Kind::Float, tch::Device::Cuda(0)));
         let y = tch::Tensor::randn([m, k], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let distances =
-            tch::Tensor::zeros([n, m], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let distances = tch::Tensor::zeros([n, m], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
-        let x_dl = BorrowedDLTensor::try_from(&x).unwrap();
-        let y_dl = BorrowedDLTensor::try_from(&y).unwrap();
-        let dist_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
-        pairwise_distance(
-            &res,
-            &x_dl,
-            &y_dl,
-            &dist_dl,
-            DistanceType::L2SqrtUnexpanded,
-        )
-        .unwrap();
+        pairwise_distance(&res, &x, &y, &distances, DistanceType::L2SqrtUnexpanded).unwrap();
 
         let expected = tch::Tensor::cdist(&x, &y, 2.0, None::<i64>);
-        let n_el = (n * m) as usize;
-        let mut got = vec![0f32; n_el];
-        let mut exp = vec![0f32; n_el];
-        distances.copy_data(&mut got, n_el);
-        expected.copy_data(&mut exp, n_el);
-        for i in 0..n_el {
-            assert!(
-                (got[i] - exp[i]).abs() < 1e-3,
-                "row mismatch at {i}: got {} expected {}",
-                got[i],
-                exp[i]
-            );
+        let got: Vec<Vec<f32>> = Vec::try_from(&distances).unwrap();
+        let exp: Vec<Vec<f32>> = Vec::try_from(&expected).unwrap();
+        for (row_idx, (got_row, exp_row)) in got.iter().zip(&exp).enumerate() {
+            for (col_idx, (got_val, exp_val)) in got_row.iter().zip(exp_row).enumerate() {
+                let i = row_idx * exp_row.len() + col_idx;
+                assert!(
+                    (*got_val - *exp_val).abs() < 1e-3,
+                    "row mismatch at {i}: got {} expected {}",
+                    got_val,
+                    exp_val
+                );
+            }
         }
     }
 
@@ -219,31 +226,28 @@ mod tests {
         let distances = tch::Tensor::zeros([n, m], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
-        let x_dl = BorrowedDLTensor::try_from(&x).unwrap();
-        let y_dl = BorrowedDLTensor::try_from(&y).unwrap();
-        let dist_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
         pairwise_distance(
             &res,
-            &x_dl,
-            &y_dl,
-            &dist_dl,
+            &x,
+            &y,
+            &distances,
             DistanceType::LpUnexpanded(OrderedFloat(p as f32)),
         )
         .unwrap();
 
         let expected = tch::Tensor::cdist(&x, &y, p, None::<i64>);
-        let n_el = (n * m) as usize;
-        let mut got = vec![0f32; n_el];
-        let mut exp = vec![0f32; n_el];
-        distances.copy_data(&mut got, n_el);
-        expected.copy_data(&mut exp, n_el);
-        for i in 0..n_el {
-            assert!(
-                (got[i] - exp[i]).abs() < 1e-3,
-                "row mismatch at {i}: got {} expected {}",
-                got[i],
-                exp[i]
-            );
+        let got: Vec<Vec<f32>> = Vec::try_from(&distances).unwrap();
+        let exp: Vec<Vec<f32>> = Vec::try_from(&expected).unwrap();
+        for (row_idx, (got_row, exp_row)) in got.iter().zip(&exp).enumerate() {
+            for (col_idx, (got_val, exp_val)) in got_row.iter().zip(exp_row).enumerate() {
+                let i = row_idx * exp_row.len() + col_idx;
+                assert!(
+                    (*got_val - *exp_val).abs() < 1e-3,
+                    "row mismatch at {i}: got {} expected {}",
+                    got_val,
+                    exp_val
+                );
+            }
         }
     }
 

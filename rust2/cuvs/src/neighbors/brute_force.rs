@@ -13,9 +13,10 @@ use std::marker::PhantomData;
 use std::path::Path;
 
 use crate::distance::DistanceType;
-use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi};
+use crate::dlpack::{DLPackError, DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut};
 use crate::error::{LibraryError, check_cuvs};
 pub use crate::neighbors::filters::SearchFilter;
+use crate::neighbors::filters::no_filter;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
@@ -25,6 +26,9 @@ pub enum BruteForceError {
     /// The C library reported a failure.
     #[error(transparent)]
     Library(#[from] LibraryError),
+    /// Tensor conversion into DLPack metadata failed.
+    #[error(transparent)]
+    DLPack(#[from] DLPackError),
     /// A file path contained an interior NUL byte.
     #[error("path contains interior NUL byte")]
     InvalidPath(#[from] std::ffi::NulError),
@@ -45,11 +49,15 @@ impl<'d> Index<'d> {
     /// Build a brute force index from a dataset tensor.
     ///
     /// The returned index borrows `dataset` — it must outlive the index.
-    pub fn build<T: AsDLTensor + ?Sized>(
+    pub fn build<D>(
         res: &Resources,
-        dataset: &'d T,
+        dataset: D,
         metric: DistanceType,
-    ) -> Result<Self, BruteForceError> {
+    ) -> Result<Self, BruteForceError>
+    where
+        D: IntoDlTensor<'d>,
+    {
+        let dataset = dataset.into_dl_tensor()?;
         let mut handle: ffi::cuvsBruteForceIndex_t = std::ptr::null_mut();
         let status = unsafe { ffi::cuvsBruteForceIndexCreate(&mut handle) };
         check_cuvs(status)?;
@@ -64,7 +72,7 @@ impl<'d> Index<'d> {
         let status = unsafe {
             ffi::cuvsBruteForceBuild(
                 res.handle(),
-                dataset.ffi_ptr(),
+                dataset.as_ptr(),
                 metric.into(),
                 metric.metric_arg(),
                 idx.handle,
@@ -79,26 +87,48 @@ impl<'d> Index<'d> {
     ///
     /// The C function writes results into the pre-allocated `neighbors` and
     /// `distances` buffers.
-    pub fn search(
+    pub fn search<'q, 'n, 'dist, Q, N, Dist>(
         &self,
         res: &Resources,
-        queries: &impl AsDLTensor,
-        neighbors: &impl AsMutDLTensor,
-        distances: &impl AsMutDLTensor,
+        queries: Q,
+        neighbors: N,
+        distances: Dist,
+    ) -> Result<(), BruteForceError>
+    where
+        Q: IntoDlTensor<'q>,
+        N: IntoDlTensorMut<'n>,
+        Dist: IntoDlTensorMut<'dist>,
+    {
+        let queries = queries.into_dl_tensor()?;
+        let neighbors = neighbors.into_dl_tensor_mut()?;
+        let distances = distances.into_dl_tensor_mut()?;
+        self.search_impl(res, &queries, &neighbors, &distances, no_filter())
+    }
+
+    /// Search the index for nearest neighbors with a row filter.
+    pub fn search_filtered<'q, 'n, 'dist, Q, N, Dist>(
+        &self,
+        res: &Resources,
+        queries: Q,
+        neighbors: N,
+        distances: Dist,
         filter: &SearchFilter<'_>,
-    ) -> Result<(), BruteForceError> {
-        let status = unsafe {
-            ffi::cuvsBruteForceSearch(
-                res.handle(),
-                self.handle,
-                queries.ffi_ptr(),
-                neighbors.ffi_ptr(),
-                distances.ffi_ptr(),
-                filter.as_cuvs_filter(),
-            )
-        };
-        check_cuvs(status)?;
-        Ok(())
+    ) -> Result<(), BruteForceError>
+    where
+        Q: IntoDlTensor<'q>,
+        N: IntoDlTensorMut<'n>,
+        Dist: IntoDlTensorMut<'dist>,
+    {
+        let queries = queries.into_dl_tensor()?;
+        let neighbors = neighbors.into_dl_tensor_mut()?;
+        let distances = distances.into_dl_tensor_mut()?;
+        self.search_impl(
+            res,
+            &queries,
+            &neighbors,
+            &distances,
+            filter.as_cuvs_filter(),
+        )
     }
 
     /// Save the index to a file.
@@ -141,6 +171,28 @@ impl<'d> Index<'d> {
 
         Ok(idx)
     }
+
+    fn search_impl(
+        &self,
+        res: &Resources,
+        queries: &DLTensorView<'_>,
+        neighbors: &DLTensorViewMut<'_>,
+        distances: &DLTensorViewMut<'_>,
+        filter: ffi::cuvsFilter,
+    ) -> Result<(), BruteForceError> {
+        let status = unsafe {
+            ffi::cuvsBruteForceSearch(
+                res.handle(),
+                self.handle,
+                queries.as_ptr(),
+                neighbors.as_ptr(),
+                distances.as_ptr(),
+                filter,
+            )
+        };
+        check_cuvs(status)?;
+        Ok(())
+    }
 }
 
 impl Drop for Index<'_> {
@@ -153,7 +205,7 @@ impl Drop for Index<'_> {
 mod tests {
     use super::*;
     use crate::distance::DistanceType;
-    use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
+    use crate::dlpack::{DLTensorView, DLTensorViewMut};
     use crate::neighbors::cagra;
     use crate::neighbors::filters::{Bitmap, Bitset, Filter, SearchFilter};
     use crate::resources::Resources;
@@ -176,10 +228,10 @@ mod tests {
     }
 
     fn extract_neighbor_indices(neighbors: &tch::Tensor, n_queries: i64, k: i64) -> Vec<i64> {
-        let n_elements = (n_queries * k) as usize;
-        let mut buf = vec![0i64; n_elements];
-        neighbors.copy_data(&mut buf, n_elements);
-        buf
+        let expected_shape = [n_queries as usize, k as usize];
+        let rows: Vec<Vec<i64>> = Vec::try_from(neighbors).unwrap();
+        assert_eq!(rows.len(), expected_shape[0]);
+        rows.into_iter().flatten().collect()
     }
 
     #[test]
@@ -193,38 +245,20 @@ mod tests {
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
-
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded).unwrap();
-
-        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        let index = Index::build(&res, &dataset, DistanceType::L2Expanded).unwrap();
         index
-            .search(
-                &res,
-                &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
-                &SearchFilter::None,
-            )
+            .search(&res, &queries, &neighbors, &distances)
             .unwrap();
 
         // Verify: all neighbor indices are in range [0, N_ROWS).
-        let n_elements = (N_QUERIES * K) as usize;
-        let mut buf = vec![0i64; n_elements];
-        neighbors.copy_data(&mut buf, n_elements);
-        for &idx in &buf {
-            assert!(
-                idx >= 0 && idx < N_ROWS,
-                "neighbor index {idx} out of range"
-            );
+        let buf: Vec<Vec<i64>> = Vec::try_from(&neighbors).unwrap();
+        for &idx in buf.iter().flatten() {
+            assert!((0..N_ROWS).contains(&idx), "neighbor index {idx} out of range");
         }
 
         // Verify: distances are non-negative for L2.
-        let mut dbuf = vec![0f32; n_elements];
-        distances.copy_data(&mut dbuf, n_elements);
-        for &d in &dbuf {
+        let dbuf: Vec<Vec<f32>> = Vec::try_from(&distances).unwrap();
+        for &d in dbuf.iter().flatten() {
             assert!(d >= 0.0, "L2 distance {d} should be non-negative");
         }
     }
@@ -240,31 +274,22 @@ mod tests {
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
-
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
-        let cagra_index =
-            cagra::Index::build(&res, &cagra::IndexParams::builder().build().unwrap(), &dataset_dl)
-                .unwrap();
+        let cagra_index = cagra::Index::build(
+            &res,
+            &cagra::IndexParams::builder().build().unwrap(),
+            &dataset,
+        )
+        .unwrap();
         let dataset_view = cagra_index.dataset().unwrap();
 
         let index = Index::build(&res, &dataset_view, DistanceType::L2Expanded).unwrap();
-
-        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
         index
-            .search(
-                &res,
-                &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
-                &SearchFilter::None,
-            )
+            .search(&res, &queries, &neighbors, &distances)
             .unwrap();
 
         let indices = extract_neighbor_indices(&neighbors, N_QUERIES, K);
         for &idx in &indices {
-            assert!(idx >= 0 && idx < N_ROWS, "neighbor index {idx} out of range");
+            assert!((0..N_ROWS).contains(&idx), "neighbor index {idx} out of range");
         }
     }
 
@@ -277,18 +302,18 @@ mod tests {
         let bitset = tch::Tensor::from_slice(&[0b0110i32]).to(tch::Device::Cuda(0));
 
         let res = Resources::new().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded).unwrap();
 
-        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        let queries_dl = DLTensorView::try_from(&queries).unwrap();
+        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
+        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
         index
-            .search(
+            .search_filtered(
                 &res,
                 &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
+                neighbors_dl,
+                distances_dl,
                 &SearchFilter::Bitset(Filter::<Bitset>::new(&bitset).unwrap()),
             )
             .unwrap();
@@ -306,18 +331,13 @@ mod tests {
         let bitmap = tch::Tensor::from_slice(&[0b0010_0100i32]).to(tch::Device::Cuda(0));
 
         let res = Resources::new().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded).unwrap();
-
-        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        let index = Index::build(&res, &dataset, DistanceType::L2Expanded).unwrap();
         index
-            .search(
+            .search_filtered(
                 &res,
-                &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
+                &queries,
+                &neighbors,
+                &distances,
                 &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
             )
             .unwrap();

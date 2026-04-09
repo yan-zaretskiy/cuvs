@@ -14,6 +14,7 @@ mod params;
 pub use index::Index;
 pub use params::IndexParams;
 
+use crate::dlpack::DLPackError;
 use crate::error::LibraryError;
 
 /// Error type for Vamana operations.
@@ -22,6 +23,9 @@ pub enum VamanaError {
     /// The C library reported a failure.
     #[error(transparent)]
     Library(#[from] LibraryError),
+    /// Tensor conversion into DLPack metadata failed.
+    #[error(transparent)]
+    DLPack(#[from] DLPackError),
     /// A file path contained an interior NUL byte.
     #[error("path contains interior NUL byte")]
     InvalidPath(#[from] std::ffi::NulError),

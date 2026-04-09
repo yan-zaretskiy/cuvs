@@ -7,9 +7,9 @@
 
 use std::marker::PhantomData;
 
-use crate::ffi;
 use crate::NotSend;
 use crate::error::{LibraryError, check_cuvs};
+use crate::ffi;
 
 /// Error type for resource operations.
 #[derive(Debug, thiserror::Error)]

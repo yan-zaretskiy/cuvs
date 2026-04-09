@@ -45,6 +45,13 @@ pub struct Params {
 }
 
 impl Params {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, KMeansError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsKMeansParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(crate) fn as_ptr(&self) -> ffi::cuvsKMeansParams_t {
         self.handle
     }
@@ -111,10 +118,7 @@ impl Params {
             ));
         }
 
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsKMeansParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         unsafe {
             if let Some(v) = metric {
                 (*params.handle).metric = v.into();
@@ -169,6 +173,12 @@ mod tests {
     fn rejects_non_positive_n_clusters() {
         let res = Params::builder().n_clusters(0).build();
         assert!(matches!(res, Err(KMeansError::Validation(_))));
+    }
+
+    #[test]
+    fn try_new_allocates_default_params() {
+        let params = Params::try_new().unwrap();
+        assert!(!params.as_ptr().is_null());
     }
 
     #[test]

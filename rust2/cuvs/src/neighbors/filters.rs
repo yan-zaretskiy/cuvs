@@ -7,7 +7,7 @@
 
 use std::marker::PhantomData;
 
-use crate::dlpack::{BorrowedDLTensor, DLPackError};
+use crate::dlpack::{DLPackError, DLTensorView, IntoDlTensor};
 use crate::ffi;
 
 /// Error returned when constructing an invalid filter payload.
@@ -43,12 +43,10 @@ pub enum Bitmap {}
 /// Shared search filter options for nearest-neighbor search APIs.
 ///
 /// Support varies by algorithm:
-/// - brute force: `None`, `Bitset`, and `Bitmap`
-/// - CAGRA: `None` and `Bitset`
-/// - IVF-Flat: `None` and `Bitset`
+/// - brute force: `Bitset` and `Bitmap`
+/// - CAGRA: `Bitset`
+/// - IVF-Flat: `Bitset`
 pub enum SearchFilter<'a> {
-    /// Search without filtering.
-    None,
     /// Reuse one row-level bitset for every query.
     Bitset(Filter<'a, Bitset>),
     /// Use a per-query bitmap of allowed `(query, row)` pairs.
@@ -79,19 +77,18 @@ impl FilterKind for Bitmap {
 /// also accepted and re-tagged as `uint32` in the temporary DLPack metadata
 /// passed to the C API.
 pub struct Filter<'a, K: FilterKind> {
-    tensor: BorrowedDLTensor<'a>,
+    tensor: DLTensorView<'a>,
     _kind: PhantomData<K>,
 }
 
 impl<'a, K: FilterKind> Filter<'a, K> {
     /// Create a packed filter from a tensor-like input supported by
-    /// [`BorrowedDLTensor`].
-    pub fn new<T>(filter_words: &'a T) -> Result<Self, FilterError>
+    /// [`IntoDlTensor`].
+    pub fn new<T>(filter_words: T) -> Result<Self, FilterError>
     where
-        BorrowedDLTensor<'a>: TryFrom<&'a T>,
-        FilterError: From<<BorrowedDLTensor<'a> as TryFrom<&'a T>>::Error>,
+        T: IntoDlTensor<'a>,
     {
-        let tensor = BorrowedDLTensor::try_from(filter_words)?;
+        let tensor = filter_words.into_dl_tensor()?;
         let ptr = tensor.as_ptr();
         let dl = unsafe { &mut (*ptr).dl_tensor };
 
@@ -142,13 +139,16 @@ impl<'a, K: FilterKind> Filter<'a, K> {
     }
 }
 
+pub(crate) fn no_filter() -> ffi::cuvsFilter {
+    ffi::cuvsFilter {
+        addr: 0,
+        type_: ffi::cuvsFilterType::NO_FILTER,
+    }
+}
+
 impl SearchFilter<'_> {
     pub(crate) fn as_cuvs_filter(&self) -> ffi::cuvsFilter {
         match self {
-            Self::None => ffi::cuvsFilter {
-                addr: 0,
-                type_: ffi::cuvsFilterType::NO_FILTER,
-            },
             Self::Bitset(f) => f.as_cuvs_filter(),
             Self::Bitmap(f) => f.as_cuvs_filter(),
         }

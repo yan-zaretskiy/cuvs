@@ -15,6 +15,7 @@ mod params;
 pub use index::{Index, PrecomputedIndex};
 pub use params::{IndexParams, SearchParams};
 
+use crate::dlpack::DLPackError;
 use crate::error::LibraryError;
 use crate::ffi;
 
@@ -44,9 +45,7 @@ impl From<CodebookGen> for ffi::cuvsIvfPqCodebookGen {
 impl From<ffi::cuvsIvfPqCodebookGen> for CodebookGen {
     fn from(v: ffi::cuvsIvfPqCodebookGen) -> Self {
         match v {
-            ffi::cuvsIvfPqCodebookGen::CUVS_IVF_PQ_CODEBOOK_GEN_PER_SUBSPACE => {
-                Self::PerSubspace
-            }
+            ffi::cuvsIvfPqCodebookGen::CUVS_IVF_PQ_CODEBOOK_GEN_PER_SUBSPACE => Self::PerSubspace,
             ffi::cuvsIvfPqCodebookGen::CUVS_IVF_PQ_CODEBOOK_GEN_PER_CLUSTER => Self::PerCluster,
         }
     }
@@ -149,6 +148,9 @@ pub enum IvfPqError {
     /// The C library reported a failure.
     #[error(transparent)]
     Library(#[from] LibraryError),
+    /// Tensor conversion into DLPack metadata failed.
+    #[error(transparent)]
+    DLPack(#[from] DLPackError),
     /// A file path contained an interior NUL byte.
     #[error("path contains interior NUL byte")]
     InvalidPath(#[from] std::ffi::NulError),

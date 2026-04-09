@@ -10,13 +10,13 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
-use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi, ReturnedDLTensor};
+use crate::dlpack::{IntoDlTensor, IntoDlTensorMut, ReturnedDLTensor};
 use crate::error::check_cuvs;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
-use super::params::{IndexParams, SearchParams};
 use super::IvfPqError;
+use super::params::{IndexParams, SearchParams};
 
 /// An IVF-PQ approximate nearest neighbor index.
 ///
@@ -64,20 +64,19 @@ impl Index {
     ///
     /// Supported dataset/query dtypes in the current C-backed implementation
     /// are `f32`, `f16`, `i8`, and `u8`.
-    pub fn build(
+    pub fn build<'a, D>(
         res: &Resources,
         params: &IndexParams,
-        dataset: &impl AsDLTensor,
-    ) -> Result<Self, IvfPqError> {
+        dataset: D,
+    ) -> Result<Self, IvfPqError>
+    where
+        D: IntoDlTensor<'a>,
+    {
+        let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
         let status = unsafe {
-            ffi::cuvsIvfPqBuild(
-                res.handle(),
-                params.handle(),
-                dataset.ffi_ptr(),
-                idx.handle,
-            )
+            ffi::cuvsIvfPqBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
         };
         check_cuvs(status)?;
         Ok(idx)
@@ -102,15 +101,25 @@ impl Index {
     /// The resulting index stores only the trained model state. To make it
     /// searchable, call [`Index::extend`] to add dataset vectors and establish
     /// the active dataset dtype.
-    pub fn build_precomputed<'a>(
+    pub fn build_precomputed<'a, P, CP, CR, RM>(
         res: &Resources,
         params: &IndexParams,
         dim: u32,
-        pq_centers: &'a impl AsDLTensor,
-        centers_padded: &'a impl AsDLTensor,
-        centers_rot: &'a impl AsDLTensor,
-        rotation_matrix: &'a impl AsDLTensor,
-    ) -> Result<PrecomputedIndex<'a>, IvfPqError> {
+        pq_centers: P,
+        centers_padded: CP,
+        centers_rot: CR,
+        rotation_matrix: RM,
+    ) -> Result<PrecomputedIndex<'a>, IvfPqError>
+    where
+        P: IntoDlTensor<'a>,
+        CP: IntoDlTensor<'a>,
+        CR: IntoDlTensor<'a>,
+        RM: IntoDlTensor<'a>,
+    {
+        let pq_centers = pq_centers.into_dl_tensor()?;
+        let centers_padded = centers_padded.into_dl_tensor()?;
+        let centers_rot = centers_rot.into_dl_tensor()?;
+        let rotation_matrix = rotation_matrix.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
         let status = unsafe {
@@ -118,10 +127,10 @@ impl Index {
                 res.handle(),
                 params.handle(),
                 dim,
-                pq_centers.ffi_ptr(),
-                centers_padded.ffi_ptr(),
-                centers_rot.ffi_ptr(),
-                rotation_matrix.ffi_ptr(),
+                pq_centers.as_ptr(),
+                centers_padded.as_ptr(),
+                centers_rot.as_ptr(),
+                rotation_matrix.as_ptr(),
                 idx.handle,
             )
         };
@@ -141,9 +150,8 @@ impl Index {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
         let idx = Self::create_handle()?;
 
-        let status = unsafe {
-            ffi::cuvsIvfPqDeserialize(res.handle(), c_path.as_ptr(), idx.handle)
-        };
+        let status =
+            unsafe { ffi::cuvsIvfPqDeserialize(res.handle(), c_path.as_ptr(), idx.handle) };
         check_cuvs(status)?;
         Ok(idx)
     }
@@ -164,16 +172,24 @@ impl Index {
     /// current implementation,
     /// `neighbors` must be an `int64` tensor and `distances` must be
     /// `float32`.
-    pub fn search(
+    pub fn search<'q, 'n, 'dist, Q, N, Dist>(
         &self,
         res: &Resources,
         params: &SearchParams,
-        queries: &impl AsDLTensor,
-        neighbors: &impl AsMutDLTensor,
-        distances: &impl AsMutDLTensor,
-    ) -> Result<(), IvfPqError> {
+        queries: Q,
+        neighbors: N,
+        distances: Dist,
+    ) -> Result<(), IvfPqError>
+    where
+        Q: IntoDlTensor<'q>,
+        N: IntoDlTensorMut<'n>,
+        Dist: IntoDlTensorMut<'dist>,
+    {
+        let queries = queries.into_dl_tensor()?;
+        let neighbors = neighbors.into_dl_tensor_mut()?;
+        let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = unsafe { (*queries.as_dl_tensor()).dl_tensor.dtype };
+        let query_dtype = queries.dl_tensor().dtype;
         Self::validate_query_dtype(index_dtype, query_dtype)?;
 
         let status = unsafe {
@@ -181,9 +197,9 @@ impl Index {
                 res.handle(),
                 params.handle(),
                 self.handle,
-                queries.ffi_ptr(),
-                neighbors.ffi_ptr(),
-                distances.ffi_ptr(),
+                queries.as_ptr(),
+                neighbors.as_ptr(),
+                distances.as_ptr(),
             )
         };
         check_cuvs(status)?;
@@ -201,17 +217,23 @@ impl Index {
     /// with shape `[n_rows]`. The current C-backed implementation accepts both
     /// host and device tensors for `extend`, but both inputs must use the same
     /// memory type.
-    pub fn extend(
+    pub fn extend<'vectors, 'indices, V, I>(
         &mut self,
         res: &Resources,
-        new_vectors: &impl AsDLTensor,
-        new_indices: &impl AsDLTensor,
-    ) -> Result<(), IvfPqError> {
+        new_vectors: V,
+        new_indices: I,
+    ) -> Result<(), IvfPqError>
+    where
+        V: IntoDlTensor<'vectors>,
+        I: IntoDlTensor<'indices>,
+    {
+        let new_vectors = new_vectors.into_dl_tensor()?;
+        let new_indices = new_indices.into_dl_tensor()?;
         let status = unsafe {
             ffi::cuvsIvfPqExtend(
                 res.handle(),
-                new_vectors.ffi_ptr(),
-                new_indices.ffi_ptr(),
+                new_vectors.as_ptr(),
+                new_indices.as_ptr(),
                 self.handle,
             )
         };
@@ -226,24 +248,32 @@ impl Index {
     /// must be a device `uint32` vector of shape `[n_rows]`. `output_dataset`
     /// must be a device `uint8` matrix with shape
     /// `[n_rows, ceil(self.pq_dim() * self.pq_bits() / 8)]`.
-    pub fn transform(
+    pub fn transform<'input, 'labels, 'output, In, Labels, Out>(
         &self,
         res: &Resources,
-        input_dataset: &impl AsDLTensor,
-        output_labels: &impl AsMutDLTensor,
-        output_dataset: &impl AsMutDLTensor,
-    ) -> Result<(), IvfPqError> {
-        let labels_dtype = unsafe { (*output_labels.as_dl_tensor()).dl_tensor.dtype };
-        let dataset_dtype = unsafe { (*output_dataset.as_dl_tensor()).dl_tensor.dtype };
+        input_dataset: In,
+        output_labels: Labels,
+        output_dataset: Out,
+    ) -> Result<(), IvfPqError>
+    where
+        In: IntoDlTensor<'input>,
+        Labels: IntoDlTensorMut<'labels>,
+        Out: IntoDlTensorMut<'output>,
+    {
+        let input_dataset = input_dataset.into_dl_tensor()?;
+        let output_labels = output_labels.into_dl_tensor_mut()?;
+        let output_dataset = output_dataset.into_dl_tensor_mut()?;
+        let labels_dtype = output_labels.dl_tensor().dtype;
+        let dataset_dtype = output_dataset.dl_tensor().dtype;
         Self::validate_transform_output_dtypes(labels_dtype, dataset_dtype)?;
 
         let status = unsafe {
             ffi::cuvsIvfPqTransform(
                 res.handle(),
                 self.handle,
-                input_dataset.ffi_ptr(),
-                output_labels.ffi_ptr(),
-                output_dataset.ffi_ptr(),
+                input_dataset.as_ptr(),
+                output_labels.as_ptr(),
+                output_dataset.as_ptr(),
             )
         };
         check_cuvs(status)?;
@@ -260,9 +290,7 @@ impl Index {
     /// subject to change across cuVS releases.
     pub fn serialize(&self, res: &Resources, path: impl AsRef<Path>) -> Result<(), IvfPqError> {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
-        let status = unsafe {
-            ffi::cuvsIvfPqSerialize(res.handle(), c_path.as_ptr(), self.handle)
-        };
+        let status = unsafe { ffi::cuvsIvfPqSerialize(res.handle(), c_path.as_ptr(), self.handle) };
         check_cuvs(status)?;
         Ok(())
     }
@@ -374,19 +402,23 @@ impl Index {
     /// rows in `out_codes` determines how many records are unpacked, starting
     /// at `offset` within `label`. The caller must also ensure that
     /// `offset + n_rows` does not exceed the size of the selected list.
-    pub fn unpack_contiguous_list_data(
+    pub fn unpack_contiguous_list_data<'a, Out>(
         &self,
         res: &Resources,
-        out_codes: &impl AsMutDLTensor,
+        out_codes: Out,
         label: u32,
         offset: u32,
-    ) -> Result<(), IvfPqError> {
+    ) -> Result<(), IvfPqError>
+    where
+        Out: IntoDlTensorMut<'a>,
+    {
+        let out_codes = out_codes.into_dl_tensor_mut()?;
         self.validate_label(label)?;
         let status = unsafe {
             ffi::cuvsIvfPqIndexUnpackContiguousListData(
                 res.handle(),
                 self.handle,
-                out_codes.ffi_ptr(),
+                out_codes.as_ptr(),
                 label,
                 offset,
             )
@@ -487,13 +519,11 @@ impl Drop for Index {
 
 #[cfg(all(test, feature = "torch"))]
 mod tests {
-    use std::cell::UnsafeCell;
-    use std::marker::PhantomData;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::dlpack::{AsDLTensor, AsMutDLTensor, BorrowedDLTensor, MutBorrowedDLTensor};
+    use crate::dlpack::{DLPackError, DLTensorView, DLTensorViewMut, IntoDlTensorMut};
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 1024;
@@ -503,23 +533,14 @@ mod tests {
     const EXTRA_ROWS: i64 = 64;
 
     struct U32TensorView<'a> {
+        tensor: &'a tch::Tensor,
         shape: Vec<i64>,
         strides: Option<Vec<i64>>,
-        managed: UnsafeCell<ffi::DLManagedTensor>,
-        _marker: PhantomData<&'a tch::Tensor>,
     }
 
     impl<'a> U32TensorView<'a> {
         fn new(tensor: &'a tch::Tensor) -> Self {
             assert_eq!(tensor.kind(), tch::Kind::Int);
-
-            let device = match tensor.device() {
-                tch::Device::Cuda(id) => ffi::DLDevice {
-                    device_type: ffi::DLDeviceType::kDLCUDA,
-                    device_id: id as i32,
-                },
-                other => panic!("unsupported device for U32TensorView: {other:?}"),
-            };
 
             let shape = tensor.size();
             let strides = if tensor.is_contiguous() {
@@ -527,52 +548,40 @@ mod tests {
             } else {
                 Some(tensor.stride())
             };
-            let managed = UnsafeCell::new(ffi::DLManagedTensor {
-                dl_tensor: ffi::DLTensor {
-                    data: tensor.data_ptr() as *mut _,
+
+            Self {
+                tensor,
+                shape,
+                strides,
+            }
+        }
+    }
+
+    impl<'a> IntoDlTensorMut<'a> for U32TensorView<'a> {
+        fn into_dl_tensor_mut(self) -> Result<DLTensorViewMut<'a>, DLPackError> {
+            let device = match self.tensor.device() {
+                tch::Device::Cuda(id) => ffi::DLDevice {
+                    device_type: ffi::DLDeviceType::kDLCUDA,
+                    device_id: id as i32,
+                },
+                other => return Err(DLPackError::UnsupportedDevice(format!("{other:?}"))),
+            };
+
+            unsafe {
+                DLTensorViewMut::from_raw_parts(
+                    self.tensor.data_ptr() as *mut _,
                     device,
-                    ndim: shape.len() as i32,
-                    dtype: ffi::DLDataType {
+                    &self.shape,
+                    self.strides.as_deref(),
+                    ffi::DLDataType {
                         code: ffi::DLDataTypeCode::kDLUInt as u8,
                         bits: 32,
                         lanes: 1,
                     },
-                    shape: std::ptr::null_mut(),
-                    strides: std::ptr::null_mut(),
-                    byte_offset: 0,
-                },
-                manager_ctx: std::ptr::null_mut(),
-                deleter: None,
-            });
-
-            Self {
-                shape,
-                strides,
-                managed,
-                _marker: PhantomData,
+                )
             }
         }
-
-        fn as_ptr(&self) -> *mut ffi::DLManagedTensor {
-            let ptr = self.managed.get();
-            unsafe {
-                (*ptr).dl_tensor.shape = self.shape.as_ptr() as *mut _;
-                (*ptr).dl_tensor.strides = self
-                    .strides
-                    .as_ref()
-                    .map_or(std::ptr::null_mut(), |s| s.as_ptr() as *mut _);
-            }
-            ptr
-        }
     }
-
-    unsafe impl AsDLTensor for U32TensorView<'_> {
-        fn as_dl_tensor(&self) -> *const ffi::DLManagedTensor {
-            self.as_ptr()
-        }
-    }
-
-    unsafe impl AsMutDLTensor for U32TensorView<'_> {}
 
     fn search_neighbor_indices(
         index: &Index,
@@ -585,24 +594,19 @@ mod tests {
         let distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let queries_dl = BorrowedDLTensor::try_from(queries).unwrap();
-        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
-        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+        let queries_dl = DLTensorView::try_from(queries).unwrap();
+        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
+        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
 
         index
-            .search(
-                res,
-                search_params,
-                &queries_dl,
-                &neighbors_dl,
-                &distances_dl,
-            )
+            .search(res, search_params, &queries_dl, neighbors_dl, distances_dl)
             .unwrap();
 
-        let n_elements = (N_QUERIES * K) as usize;
-        let mut buf = vec![0i64; n_elements];
-        neighbors.copy_data(&mut buf, n_elements);
-        buf
+        Vec::<Vec<i64>>::try_from(&neighbors)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     fn assert_indices_in_range(indices: &[i64], upper: i64) {
@@ -648,11 +652,14 @@ mod tests {
     #[test]
     fn build_and_search() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let params = IndexParams::builder().n_lists(16).pq_dim(8).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let params = IndexParams::builder()
+            .n_lists(16)
+            .pq_dim(8)
+            .build()
+            .unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
@@ -672,11 +679,10 @@ mod tests {
     #[test]
     fn build_and_search_with_default_builders() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
@@ -692,12 +698,16 @@ mod tests {
     #[test]
     fn search_after_source_dataset_drop() {
         let res = Resources::new().unwrap();
-        let params = IndexParams::builder().n_lists(16).pq_dim(8).build().unwrap();
+        let params = IndexParams::builder()
+            .n_lists(16)
+            .pq_dim(8)
+            .build()
+            .unwrap();
 
         let index = {
             let dataset =
                 tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-            let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+            let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
             Index::build(&res, &params, &dataset_dl).unwrap()
         };
 
@@ -711,11 +721,14 @@ mod tests {
     #[test]
     fn serialize_round_trip() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let params = IndexParams::builder().n_lists(16).pq_dim(8).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let params = IndexParams::builder()
+            .n_lists(16)
+            .pq_dim(8)
+            .build()
+            .unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let path = temp_path("ivf-pq-roundtrip");
@@ -737,12 +750,15 @@ mod tests {
     #[test]
     fn tensor_view_accessors() {
         let res = Resources::new().unwrap();
-        let dataset =
-            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let n_lists = 16u32;
-        let params = IndexParams::builder().n_lists(n_lists).pq_dim(8).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let params = IndexParams::builder()
+            .n_lists(n_lists)
+            .pq_dim(8)
+            .build()
+            .unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let centers = index.centers().unwrap();
@@ -773,8 +789,12 @@ mod tests {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let params = IndexParams::builder().n_lists(16).pq_dim(8).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let params = IndexParams::builder()
+            .n_lists(16)
+            .pq_dim(8)
+            .build()
+            .unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let mut index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let new_vectors =
@@ -784,8 +804,8 @@ mod tests {
             N_ROWS + EXTRA_ROWS,
             (tch::Kind::Int64, tch::Device::Cuda(0)),
         );
-        let new_vectors_dl = BorrowedDLTensor::try_from(&new_vectors).unwrap();
-        let new_indices_dl = BorrowedDLTensor::try_from(&new_indices).unwrap();
+        let new_vectors_dl = DLTensorView::try_from(&new_vectors).unwrap();
+        let new_indices_dl = DLTensorView::try_from(&new_indices).unwrap();
         index
             .extend(&res, &new_vectors_dl, &new_indices_dl)
             .unwrap();
@@ -805,8 +825,12 @@ mod tests {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let params = IndexParams::builder().n_lists(16).pq_dim(8).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let params = IndexParams::builder()
+            .n_lists(16)
+            .pq_dim(8)
+            .build()
+            .unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let label = find_nonempty_label(&index);
@@ -819,9 +843,9 @@ mod tests {
             [n_take, encoded_width(&index)],
             (tch::Kind::Uint8, tch::Device::Cuda(0)),
         );
-        let codes_dl = MutBorrowedDLTensor::try_from(&codes).unwrap();
+        let codes_dl = DLTensorViewMut::try_from(&codes).unwrap();
         index
-            .unpack_contiguous_list_data(&res, &codes_dl, label, 0)
+            .unpack_contiguous_list_data(&res, codes_dl, label, 0)
             .unwrap();
 
         assert_eq!(codes.size(), vec![n_take, encoded_width(&index)]);
@@ -832,8 +856,12 @@ mod tests {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let params = IndexParams::builder().n_lists(16).pq_dim(8).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let params = IndexParams::builder()
+            .n_lists(16)
+            .pq_dim(8)
+            .build()
+            .unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let invalid_label = index.n_lists().unwrap() as u32;
@@ -844,9 +872,9 @@ mod tests {
             [1, encoded_width(&index)],
             (tch::Kind::Uint8, tch::Device::Cuda(0)),
         );
-        let codes_dl = MutBorrowedDLTensor::try_from(&codes).unwrap();
+        let codes_dl = DLTensorViewMut::try_from(&codes).unwrap();
         let err = index
-            .unpack_contiguous_list_data(&res, &codes_dl, invalid_label, 0)
+            .unpack_contiguous_list_data(&res, codes_dl, invalid_label, 0)
             .unwrap_err();
         assert!(matches!(err, IvfPqError::Validation(_)));
     }
@@ -856,8 +884,12 @@ mod tests {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let params = IndexParams::builder().n_lists(16).pq_dim(8).build().unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let params = IndexParams::builder()
+            .n_lists(16)
+            .pq_dim(8)
+            .build()
+            .unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let index = Index::build(&res, &params, &dataset_dl).unwrap();
 
         let labels_storage = tch::Tensor::zeros([N_ROWS], (tch::Kind::Int, tch::Device::Cuda(0)));
@@ -866,17 +898,18 @@ mod tests {
             [N_ROWS, encoded_width(&index)],
             (tch::Kind::Uint8, tch::Device::Cuda(0)),
         );
-        let codes_dl = MutBorrowedDLTensor::try_from(&codes).unwrap();
+        let codes_dl = DLTensorViewMut::try_from(&codes).unwrap();
 
         index
-            .transform(&res, &dataset_dl, &labels_dl, &codes_dl)
+            .transform(&res, &dataset_dl, labels_dl, codes_dl)
             .unwrap();
 
-        let mut labels = vec![0i32; N_ROWS as usize];
-        labels_storage.copy_data(&mut labels, N_ROWS as usize);
-        assert!(labels
-            .iter()
-            .all(|&label| label >= 0 && i64::from(label) < index.n_lists().unwrap()));
+        let labels: Vec<i32> = Vec::try_from(&labels_storage).unwrap();
+        assert!(
+            labels
+                .iter()
+                .all(|&label| label >= 0 && i64::from(label) < index.n_lists().unwrap())
+        );
         assert_eq!(codes.size(), vec![N_ROWS, encoded_width(&index)]);
     }
 
@@ -891,7 +924,7 @@ mod tests {
             .add_data_on_build(false)
             .build()
             .unwrap();
-        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
         let template = Index::build(&res, &params, &dataset_dl).unwrap();
         assert_eq!(template.size().unwrap(), 0);
 
@@ -912,7 +945,7 @@ mod tests {
         .unwrap();
 
         let indices = tch::Tensor::arange(N_ROWS, (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let indices_dl = BorrowedDLTensor::try_from(&indices).unwrap();
+        let indices_dl = DLTensorView::try_from(&indices).unwrap();
         index.extend(&res, &dataset_dl, &indices_dl).unwrap();
 
         assert_eq!(index.size().unwrap(), N_ROWS);

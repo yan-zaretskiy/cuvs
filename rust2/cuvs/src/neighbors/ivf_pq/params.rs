@@ -20,7 +20,7 @@ use crate::error::check_cuvs;
 use crate::ffi;
 
 use super::{
-    CodebookGen, CoarseSearchDType, InternalDistanceDType, IvfPqError, ListLayout, LutDType,
+    CoarseSearchDType, CodebookGen, InternalDistanceDType, IvfPqError, ListLayout, LutDType,
 };
 
 /// Parameters for building an IVF-PQ index.
@@ -88,10 +88,7 @@ impl IndexParams {
             )));
         }
 
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsIvfPqIndexParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         unsafe {
             if let Some(v) = metric {
                 (*params.handle).metric = v.into();
@@ -137,6 +134,13 @@ impl IndexParams {
 }
 
 impl IndexParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, IvfPqError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfPqIndexParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsIvfPqIndexParams_t {
         self.handle
     }
@@ -207,10 +211,7 @@ impl SearchParams {
             ));
         }
 
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsIvfPqSearchParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         unsafe {
             if let Some(v) = n_probes {
                 (*params.handle).n_probes = v;
@@ -237,6 +238,13 @@ impl SearchParams {
 }
 
 impl SearchParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, IvfPqError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfPqSearchParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsIvfPqSearchParams_t {
         self.handle
     }
@@ -270,6 +278,15 @@ mod tests {
     }
 
     #[test]
+    fn index_params_try_new_uses_library_defaults() {
+        let params = IndexParams::try_new().unwrap();
+        unsafe {
+            assert_eq!((*params.handle()).metric, ffi::cuvsDistanceType::L2Expanded);
+            assert!((*params.handle()).n_lists > 0);
+        }
+    }
+
+    #[test]
     fn index_params_reject_invalid_pq_bits() {
         let err = IndexParams::builder().pq_bits(3).build().unwrap_err();
         assert!(matches!(err, IvfPqError::Validation(_)));
@@ -289,6 +306,14 @@ mod tests {
     fn search_params_reject_zero_n_probes() {
         let err = SearchParams::builder().n_probes(0).build().unwrap_err();
         assert!(matches!(err, IvfPqError::Validation(_)));
+    }
+
+    #[test]
+    fn search_params_try_new_uses_library_defaults() {
+        let params = SearchParams::try_new().unwrap();
+        unsafe {
+            assert!((*params.handle()).n_probes > 0);
+        }
     }
 
     #[test]
@@ -325,7 +350,10 @@ mod tests {
             .build()
             .unwrap();
         unsafe {
-            assert_eq!((*params.handle()).metric, ffi::cuvsDistanceType::LpUnexpanded);
+            assert_eq!(
+                (*params.handle()).metric,
+                ffi::cuvsDistanceType::LpUnexpanded
+            );
             assert_eq!((*params.handle()).metric_arg, 4.0);
         }
     }

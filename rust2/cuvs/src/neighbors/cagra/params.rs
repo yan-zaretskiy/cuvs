@@ -55,16 +55,14 @@ impl CompressionParams {
         pq_kmeans_trainset_fraction: Option<f64>,
     ) -> Result<Self, CagraError> {
         if let Some(bits) = pq_bits
-            && !(4..=16).contains(&bits) {
-                return Err(CagraError::Validation(format!(
-                    "pq_bits must be within [4, 16], got {bits}"
-                )));
-            }
+            && !(4..=16).contains(&bits)
+        {
+            return Err(CagraError::Validation(format!(
+                "pq_bits must be within [4, 16], got {bits}"
+            )));
+        }
 
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsCagraCompressionParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         unsafe {
             if let Some(v) = pq_bits {
                 (*params.handle).pq_bits = v;
@@ -91,6 +89,13 @@ impl CompressionParams {
 }
 
 impl CompressionParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, CagraError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsCagraCompressionParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     fn handle(&self) -> ffi::cuvsCagraCompressionParams_t {
         self.handle
     }
@@ -143,7 +148,7 @@ impl AceParams {
         max_host_memory_gb: Option<f64>,
         max_gpu_memory_gb: Option<f64>,
     ) -> Result<Self, CagraError> {
-        let params = Self::try_default()?;
+        let params = Self::try_new()?;
 
         unsafe {
             if let Some(v) = npartitions {
@@ -173,7 +178,8 @@ impl AceParams {
 }
 
 impl AceParams {
-    fn try_default() -> Result<Self, CagraError> {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, CagraError> {
         let mut handle = ptr::null_mut();
         check_cuvs(unsafe { ffi::cuvsAceParamsCreate(&mut handle) })?;
         Ok(Self { handle })
@@ -236,21 +242,10 @@ impl IvfPqGraphBuildParams {
         n_probes: Option<u32>,
         refinement_rate: Option<f32>,
     ) -> Result<Self, CagraError> {
-        let mut build_handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsIvfPqIndexParamsCreate(&mut build_handle) })?;
-
-        // Wrap early so Drop cleans up build_handle if search create fails.
-        let mut params = Self {
-            inner: Box::new(ffi::cuvsIvfPqParams {
-                ivf_pq_build_params: build_handle,
-                ivf_pq_search_params: ptr::null_mut(),
-                refinement_rate: refinement_rate.unwrap_or(2.0),
-            }),
-        };
-
-        let mut search_handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsIvfPqSearchParamsCreate(&mut search_handle) })?;
-        params.inner.ivf_pq_search_params = search_handle;
+        let mut params = Self::try_new()?;
+        params.inner.refinement_rate = refinement_rate.unwrap_or(params.inner.refinement_rate);
+        let build_handle = params.inner.ivf_pq_build_params;
+        let search_handle = params.inner.ivf_pq_search_params;
 
         unsafe {
             if let Some(v) = n_lists {
@@ -278,6 +273,26 @@ impl IvfPqGraphBuildParams {
 }
 
 impl IvfPqGraphBuildParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, CagraError> {
+        let mut build_handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfPqIndexParamsCreate(&mut build_handle) })?;
+
+        let mut params = Self {
+            inner: Box::new(ffi::cuvsIvfPqParams {
+                ivf_pq_build_params: build_handle,
+                ivf_pq_search_params: ptr::null_mut(),
+                refinement_rate: 2.0,
+            }),
+        };
+
+        let mut search_handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsIvfPqSearchParamsCreate(&mut search_handle) })?;
+        params.inner.ivf_pq_search_params = search_handle;
+
+        Ok(params)
+    }
+
     fn as_mut_ptr(&mut self) -> *mut ffi::cuvsIvfPqParams {
         &mut *self.inner as *mut _
     }
@@ -379,29 +394,32 @@ impl IndexParams {
         intermediate_graph_degree: Option<usize>,
         graph_degree: Option<usize>,
         compression: Option<CompressionParams>,
-        #[builder(setters(vis = "", some_fn = graph_build_internal))]
-        graph_build: Option<RequestedGraphBuild>,
+        #[builder(setters(vis = "", some_fn = graph_build_internal))] graph_build: Option<
+            RequestedGraphBuild,
+        >,
     ) -> Result<Self, CagraError> {
         if let Some(d) = graph_degree
-            && d == 0 {
-                return Err(CagraError::Validation("graph_degree must be > 0".into()));
-            }
+            && d == 0
+        {
+            return Err(CagraError::Validation("graph_degree must be > 0".into()));
+        }
 
         if let (Some(inter), Some(graph)) = (intermediate_graph_degree, graph_degree)
-            && inter < graph {
-                return Err(CagraError::Validation(format!(
-                    "intermediate_graph_degree ({inter}) must be >= graph_degree ({graph})"
-                )));
-            }
+            && inter < graph
+        {
+            return Err(CagraError::Validation(format!(
+                "intermediate_graph_degree ({inter}) must be >= graph_degree ({graph})"
+            )));
+        }
 
         if let Some(RequestedGraphBuild::NnDescent {
             nn_descent_niter: Some(n),
         }) = &graph_build
             && *n == 0
         {
-                return Err(CagraError::Validation(
-                    "nn_descent_niter must be > 0".into(),
-                ));
+            return Err(CagraError::Validation(
+                "nn_descent_niter must be > 0".into(),
+            ));
         }
 
         let metric_supports_compression = metric.is_none_or(|v| v == DistanceType::L2Expanded);
@@ -411,16 +429,7 @@ impl IndexParams {
             ));
         }
 
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsCagraIndexParamsCreate(&mut handle) })?;
-
-        let default_graph_build_params = unsafe { (*handle).graph_build_params };
-        let mut params = Self {
-            handle,
-            default_graph_build_params,
-            graph_build_owner: None,
-            compression: None,
-        };
+        let mut params = Self::try_new()?;
 
         unsafe {
             if let Some(v) = metric {
@@ -508,10 +517,7 @@ impl<S: State> IndexParamsBuilder<S> {
     }
 
     /// Build the graph with explicit IVF-PQ graph-build parameters.
-    pub fn ivf_pq_with(
-        self,
-        params: IvfPqGraphBuildParams,
-    ) -> IndexParamsBuilder<SetGraphBuild<S>>
+    pub fn ivf_pq_with(self, params: IvfPqGraphBuildParams) -> IndexParamsBuilder<SetGraphBuild<S>>
     where
         S::GraphBuild: IsUnset,
     {
@@ -520,6 +526,19 @@ impl<S: State> IndexParamsBuilder<S> {
 }
 
 impl IndexParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, CagraError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsCagraIndexParamsCreate(&mut handle) })?;
+        let default_graph_build_params = unsafe { (*handle).graph_build_params };
+        Ok(Self {
+            handle,
+            default_graph_build_params,
+            graph_build_owner: None,
+            compression: None,
+        })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsCagraIndexParams_t {
         self.handle
     }
@@ -546,9 +565,7 @@ impl IndexParams {
             return Err(CagraError::Validation("m must be > 0".into()));
         }
         if ef_construction <= 0 {
-            return Err(CagraError::Validation(
-                "ef_construction must be > 0".into(),
-            ));
+            return Err(CagraError::Validation("ef_construction must be > 0".into()));
         }
 
         let mut handle = ptr::null_mut();
@@ -578,7 +595,10 @@ impl IndexParams {
         Ok(params)
     }
 
-    fn apply_graph_build(&mut self, graph_build: Option<RequestedGraphBuild>) -> Result<(), CagraError> {
+    fn apply_graph_build(
+        &mut self,
+        graph_build: Option<RequestedGraphBuild>,
+    ) -> Result<(), CagraError> {
         let Some(graph_build) = graph_build else {
             return Ok(());
         };
@@ -609,7 +629,7 @@ impl IndexParams {
                 self.graph_build_owner = None;
             }
             RequestedGraphBuild::AceDefault => {
-                let ace = AceParams::try_default()?;
+                let ace = AceParams::try_new()?;
                 self.graph_build_owner = Some(GraphBuildOwner::Ace(ace));
                 unsafe {
                     (*self.handle).build_algo = GraphBuildAlgo::Ace.into();
@@ -705,48 +725,52 @@ impl SearchParams {
         persistent_lifetime: Option<f32>,
         persistent_device_usage: Option<f32>,
     ) -> Result<Self, CagraError> {
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsCagraSearchParamsCreate(&mut handle) })?;
-        let params = Self { handle };
+        let params = Self::try_new()?;
 
         let effective_algo = algo.unwrap_or(unsafe { (*params.handle).algo.into() });
         let effective_hashmap_mode =
             hashmap_mode.unwrap_or(unsafe { (*params.handle).hashmap_mode.into() });
 
         if let Some(n) = itopk_size
-            && effective_algo == SearchAlgo::SingleCta && n > 512 {
-                return Err(CagraError::Validation(format!(
-                    "itopk_size cannot be larger than 512 for SingleCta, got {n}"
-                )));
-            }
+            && effective_algo == SearchAlgo::SingleCta
+            && n > 512
+        {
+            return Err(CagraError::Validation(format!(
+                "itopk_size cannot be larger than 512 for SingleCta, got {n}"
+            )));
+        }
 
         if let Some(n) = team_size
-            && !matches!(n, 0 | 8 | 16 | 32) {
-                return Err(CagraError::Validation(format!(
-                    "team_size must be 0 (auto), 8, 16, or 32, got {n}"
-                )));
-            }
+            && !matches!(n, 0 | 8 | 16 | 32)
+        {
+            return Err(CagraError::Validation(format!(
+                "team_size must be 0 (auto), 8, 16, or 32, got {n}"
+            )));
+        }
 
         if let Some(n) = thread_block_size
-            && !matches!(n, 0 | 64 | 128 | 256 | 512 | 1024) {
-                return Err(CagraError::Validation(format!(
-                    "thread_block_size must be 0, 64, 128, 256, 512, or 1024, got {n}"
-                )));
-            }
+            && !matches!(n, 0 | 64 | 128 | 256 | 512 | 1024)
+        {
+            return Err(CagraError::Validation(format!(
+                "thread_block_size must be 0, 64, 128, 256, 512, or 1024, got {n}"
+            )));
+        }
 
         if let Some(bitlen) = hashmap_min_bitlen
-            && bitlen > 20 {
-                return Err(CagraError::Validation(format!(
-                    "hashmap_min_bitlen must be <= 20, got {bitlen}"
-                )));
-            }
+            && bitlen > 20
+        {
+            return Err(CagraError::Validation(format!(
+                "hashmap_min_bitlen must be <= 20, got {bitlen}"
+            )));
+        }
 
         if let Some(rate) = hashmap_max_fill_rate
-            && (!(0.1..0.9).contains(&rate)) {
-                return Err(CagraError::Validation(format!(
-                    "hashmap_max_fill_rate must be in [0.1, 0.9), got {rate}"
-                )));
-            }
+            && (!(0.1..0.9).contains(&rate))
+        {
+            return Err(CagraError::Validation(format!(
+                "hashmap_max_fill_rate must be in [0.1, 0.9), got {rate}"
+            )));
+        }
 
         if effective_algo == SearchAlgo::MultiCta && effective_hashmap_mode == HashMode::Small {
             return Err(CagraError::Validation(
@@ -809,6 +833,13 @@ impl SearchParams {
 }
 
 impl SearchParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, CagraError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsCagraSearchParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsCagraSearchParams_t {
         self.handle
     }
@@ -849,10 +880,7 @@ pub struct ExtendParams {
 impl ExtendParams {
     #[builder]
     pub fn new(max_chunk_size: Option<u32>) -> Result<Self, CagraError> {
-        let mut handle = ptr::null_mut();
-        check_cuvs(unsafe { ffi::cuvsCagraExtendParamsCreate(&mut handle) })?;
-
-        let params = Self { handle };
+        let params = Self::try_new()?;
         unsafe {
             if let Some(v) = max_chunk_size {
                 (*params.handle).max_chunk_size = v;
@@ -864,6 +892,13 @@ impl ExtendParams {
 }
 
 impl ExtendParams {
+    /// Allocate parameters populated with the library defaults.
+    pub fn try_new() -> Result<Self, CagraError> {
+        let mut handle = ptr::null_mut();
+        check_cuvs(unsafe { ffi::cuvsCagraExtendParamsCreate(&mut handle) })?;
+        Ok(Self { handle })
+    }
+
     pub(super) fn handle(&self) -> ffi::cuvsCagraExtendParams_t {
         self.handle
     }
@@ -899,7 +934,7 @@ mod tests {
 
     #[test]
     fn index_params_all_defaults() {
-        let params = IndexParams::builder().build().unwrap();
+        let params = IndexParams::try_new().unwrap();
         unsafe {
             assert_eq!((*params.handle).metric, ffi::cuvsDistanceType::L2Expanded);
             assert_eq!((*params.handle).graph_degree, 64);
@@ -959,10 +994,7 @@ mod tests {
 
     #[test]
     fn index_params_switching_to_nn_descent_clears_default_graph_build_params() {
-        let params = IndexParams::builder()
-            .nn_descent()
-            .build()
-            .unwrap();
+        let params = IndexParams::builder().nn_descent().build().unwrap();
 
         unsafe {
             assert_eq!(
@@ -1046,10 +1078,7 @@ mod tests {
 
     #[test]
     fn index_params_with_default_ace() {
-        let params = IndexParams::builder()
-            .ace()
-            .build()
-            .unwrap();
+        let params = IndexParams::builder().ace().build().unwrap();
 
         unsafe {
             assert_eq!(
@@ -1085,10 +1114,7 @@ mod tests {
 
     #[test]
     fn index_params_with_default_ivf_pq() {
-        let params = IndexParams::builder()
-            .ivf_pq()
-            .build()
-            .unwrap();
+        let params = IndexParams::builder().ivf_pq().build().unwrap();
 
         unsafe {
             assert_eq!(
@@ -1181,11 +1207,11 @@ mod tests {
 
     #[test]
     fn ace_params_all_defaults() {
-        let params = AceParams::try_default().unwrap();
+        let params = AceParams::try_new().unwrap();
         unsafe {
             assert!((*params.handle).ef_construction > 0);
             assert!(!(*params.handle).build_dir.is_null());
-            assert_eq!((*params.handle).use_disk, false);
+            assert!(!(*params.handle).use_disk);
         }
     }
 
@@ -1203,7 +1229,7 @@ mod tests {
         unsafe {
             assert_eq!((*params.handle).npartitions, 8);
             assert_eq!((*params.handle).ef_construction, 128);
-            assert_eq!((*params.handle).use_disk, true);
+            assert!((*params.handle).use_disk);
             assert_eq!((*params.handle).max_host_memory_gb, 16.0);
             assert_eq!((*params.handle).max_gpu_memory_gb, 8.0);
         }
@@ -1244,7 +1270,7 @@ mod tests {
 
     #[test]
     fn ivf_pq_graph_build_params_defaults() {
-        let params = IvfPqGraphBuildParams::builder().build().unwrap();
+        let params = IvfPqGraphBuildParams::try_new().unwrap();
         assert_eq!(params.inner.refinement_rate, 2.0);
     }
 
@@ -1285,7 +1311,7 @@ mod tests {
 
     #[test]
     fn search_params_all_defaults() {
-        let params = SearchParams::builder().build().unwrap();
+        let params = SearchParams::try_new().unwrap();
         unsafe {
             assert_eq!((*params.handle).itopk_size, 64);
             assert_eq!((*params.handle).algo, ffi::cuvsCagraSearchAlgo::SINGLE_CTA);
@@ -1304,6 +1330,26 @@ mod tests {
     }
 
     #[test]
+    fn extend_params_try_new_uses_library_defaults() {
+        let params = ExtendParams::try_new().unwrap();
+        let builder_defaults = ExtendParams::builder().build().unwrap();
+        unsafe {
+            assert_eq!(
+                (*params.handle).max_chunk_size,
+                (*builder_defaults.handle).max_chunk_size
+            );
+        }
+    }
+
+    #[test]
+    fn compression_params_try_new_uses_library_defaults() {
+        let params = CompressionParams::try_new().unwrap();
+        unsafe {
+            assert!((*params.handle).pq_bits > 0);
+        }
+    }
+
+    #[test]
     fn search_params_rejects_invalid_team_size_not_in_compiled_descriptor_table() {
         let err = SearchParams::builder().team_size(4).build().unwrap_err();
         assert!(err.to_string().contains("team_size must be"));
@@ -1312,7 +1358,10 @@ mod tests {
     #[test]
     fn search_params_accepts_compiled_team_sizes() {
         for team_size in [8, 16, 32] {
-            let params = SearchParams::builder().team_size(team_size).build().unwrap();
+            let params = SearchParams::builder()
+                .team_size(team_size)
+                .build()
+                .unwrap();
             unsafe {
                 assert_eq!((*params.handle).team_size, team_size);
             }
