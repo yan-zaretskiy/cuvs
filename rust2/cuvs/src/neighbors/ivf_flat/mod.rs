@@ -12,7 +12,8 @@
 mod index;
 mod params;
 
-pub use index::{Index, SearchFilter};
+pub use crate::neighbors::filters::SearchFilter;
+pub use index::Index;
 pub use params::{IndexParams, SearchParams};
 
 use crate::error::LibraryError;

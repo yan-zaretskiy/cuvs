@@ -40,6 +40,21 @@ pub enum Bitset {}
 /// Marker for a per-query bitmap filter.
 pub enum Bitmap {}
 
+/// Shared search filter options for nearest-neighbor search APIs.
+///
+/// Support varies by algorithm:
+/// - brute force: `None`, `Bitset`, and `Bitmap`
+/// - CAGRA: `None` and `Bitset`
+/// - IVF-Flat: `None` and `Bitset`
+pub enum SearchFilter<'a> {
+    /// Search without filtering.
+    None,
+    /// Reuse one row-level bitset for every query.
+    Bitset(Filter<'a, Bitset>),
+    /// Use a per-query bitmap of allowed `(query, row)` pairs.
+    Bitmap(Filter<'a, Bitmap>),
+}
+
 /// Type-level mapping from a Rust filter marker to the C `cuvsFilterType`.
 pub trait FilterKind {
     const FILTER_TYPE: ffi::cuvsFilterType;
@@ -124,6 +139,23 @@ impl<'a, K: FilterKind> Filter<'a, K> {
             addr: ptr as usize,
             type_: K::FILTER_TYPE,
         }
+    }
+}
+
+impl SearchFilter<'_> {
+    pub(crate) fn as_cuvs_filter(&self) -> ffi::cuvsFilter {
+        match self {
+            Self::None => ffi::cuvsFilter {
+                addr: 0,
+                type_: ffi::cuvsFilterType::NO_FILTER,
+            },
+            Self::Bitset(f) => f.as_cuvs_filter(),
+            Self::Bitmap(f) => f.as_cuvs_filter(),
+        }
+    }
+
+    pub(crate) fn uses_bitmap(&self) -> bool {
+        matches!(self, Self::Bitmap(_))
     }
 }
 

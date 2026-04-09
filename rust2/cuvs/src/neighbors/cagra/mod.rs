@@ -12,6 +12,7 @@
 mod index;
 mod params;
 
+pub use crate::neighbors::filters::SearchFilter;
 pub use index::Index;
 pub use params::{
     AceParams, CompressionParams, ExtendParams, IndexParams, IvfPqGraphBuildParams, SearchParams,

@@ -10,32 +10,12 @@ use std::path::Path;
 
 use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi, ReturnedDLTensor};
 use crate::error::check_cuvs;
-use crate::neighbors::filters::{Bitset, Filter};
+use crate::neighbors::filters::SearchFilter;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
 use super::params::{IndexParams, SearchParams};
 use super::IvfFlatError;
-
-/// Optional row filter applied during IVF-Flat search.
-pub enum SearchFilter<'a> {
-    /// Search without filtering.
-    None,
-    /// Reuse one row-level bitset for every query.
-    Bitset(Filter<'a, Bitset>),
-}
-
-impl SearchFilter<'_> {
-    fn to_ffi(&self) -> ffi::cuvsFilter {
-        match self {
-            Self::None => ffi::cuvsFilter {
-                addr: 0,
-                type_: ffi::cuvsFilterType::NO_FILTER,
-            },
-            Self::Bitset(f) => f.as_cuvs_filter(),
-        }
-    }
-}
 
 /// An IVF-Flat approximate nearest neighbor index.
 ///
@@ -116,6 +96,7 @@ impl Index {
         let index_dtype = unsafe { (*self.handle).dtype };
         let query_dtype = unsafe { (*queries.as_dl_tensor()).dl_tensor.dtype };
         Self::validate_query_dtype(index_dtype, query_dtype)?;
+        Self::validate_filter_support(filter)?;
 
         let status = unsafe {
             ffi::cuvsIvfFlatSearch(
@@ -125,7 +106,7 @@ impl Index {
                 queries.ffi_ptr(),
                 neighbors.ffi_ptr(),
                 distances.ffi_ptr(),
-                filter.to_ffi(),
+                filter.as_cuvs_filter(),
             )
         };
         check_cuvs(status)?;
@@ -224,6 +205,15 @@ impl Index {
         Ok(())
     }
 
+    fn validate_filter_support(filter: &SearchFilter<'_>) -> Result<(), IvfFlatError> {
+        if filter.uses_bitmap() {
+            return Err(IvfFlatError::Validation(
+                "bitmap filters are not supported for IVF-Flat".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn create_handle() -> Result<Self, IvfFlatError> {
         let mut handle: ffi::cuvsIvfFlatIndex_t = std::ptr::null_mut();
         let status = unsafe { ffi::cuvsIvfFlatIndexCreate(&mut handle) };
@@ -252,6 +242,7 @@ mod tests {
 
     use super::*;
     use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
+    use crate::neighbors::filters::{Bitmap, Bitset, Filter, SearchFilter};
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 1024;
@@ -447,8 +438,6 @@ mod tests {
 
     #[test]
     fn search_with_bitset_filter() {
-        use crate::neighbors::filters::{Bitset, Filter};
-
         let res = Resources::new().unwrap();
 
         let dataset = tch::Tensor::from_slice(&[0.0f32, 10.0, 20.0, 30.0])
@@ -483,6 +472,41 @@ mod tests {
         let mut buf = vec![0i64; 2];
         neighbors.copy_data(&mut buf, 2);
         assert_eq!(buf, vec![1, 2]);
+    }
+
+    #[test]
+    fn search_with_bitmap_filter_returns_validation_error() {
+        let res = Resources::new().unwrap();
+
+        let dataset =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let queries =
+            tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let neighbors =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
+        let distances =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let bitmap = tch::Tensor::from_slice(&[0b1111i32]).to(tch::Device::Cuda(0));
+
+        let params = IndexParams::builder().n_lists(16).build().unwrap();
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+
+        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+
+        let err = index
+            .search(
+                &res,
+                &SearchParams::builder().n_probes(16).build().unwrap(),
+                &queries_dl,
+                &neighbors_dl,
+                &distances_dl,
+                &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, IvfFlatError::Validation(_)));
     }
 
     #[test]

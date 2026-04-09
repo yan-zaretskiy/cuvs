@@ -11,32 +11,12 @@ use std::path::Path;
 use crate::distance::DistanceType;
 use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi, ReturnedDLTensor};
 use crate::error::check_cuvs;
-use crate::neighbors::filters::{Bitset, Filter};
+use crate::neighbors::filters::SearchFilter;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
 use super::params::{ExtendParams, IndexParams, SearchParams};
 use super::CagraError;
-
-/// Optional row filter applied during CAGRA search.
-pub enum SearchFilter<'a> {
-    /// Search without filtering.
-    None,
-    /// Reuse one row-level bitset for every query.
-    Bitset(Filter<'a, Bitset>),
-}
-
-impl SearchFilter<'_> {
-    fn to_ffi(&self) -> ffi::cuvsFilter {
-        match self {
-            Self::None => ffi::cuvsFilter {
-                addr: 0,
-                type_: ffi::cuvsFilterType::NO_FILTER,
-            },
-            Self::Bitset(f) => f.as_cuvs_filter(),
-        }
-    }
-}
 
 /// A CAGRA approximate nearest neighbor index.
 ///
@@ -125,6 +105,7 @@ impl Index {
         distances: &impl AsMutDLTensor,
         filter: &SearchFilter<'_>,
     ) -> Result<(), CagraError> {
+        Self::validate_filter_support(filter)?;
         let status = unsafe {
             ffi::cuvsCagraSearch(
                 res.handle(),
@@ -133,7 +114,7 @@ impl Index {
                 queries.ffi_ptr(),
                 neighbors.ffi_ptr(),
                 distances.ffi_ptr(),
-                filter.to_ffi(),
+                filter.as_cuvs_filter(),
             )
         };
         check_cuvs(status)?;
@@ -180,6 +161,7 @@ impl Index {
         indices: &[&Index],
         filter: &SearchFilter<'_>,
     ) -> Result<Self, CagraError> {
+        Self::validate_filter_support(filter)?;
         let output = Self::create_handle()?;
 
         let mut handles: Vec<ffi::cuvsCagraIndex_t> =
@@ -191,7 +173,7 @@ impl Index {
                 params.handle(),
                 handles.as_mut_ptr(),
                 handles.len(),
-                filter.to_ffi(),
+                filter.as_cuvs_filter(),
                 output.handle,
             )
         };
@@ -284,6 +266,15 @@ impl Index {
     // Internal helpers
     // -----------------------------------------------------------------
 
+    fn validate_filter_support(filter: &SearchFilter<'_>) -> Result<(), CagraError> {
+        if filter.uses_bitmap() {
+            return Err(CagraError::Validation(
+                "bitmap filters are not supported for CAGRA".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn create_handle() -> Result<Self, CagraError> {
         let mut handle: ffi::cuvsCagraIndex_t = std::ptr::null_mut();
         let status = unsafe { ffi::cuvsCagraIndexCreate(&mut handle) };
@@ -313,8 +304,8 @@ mod tests {
     use super::*;
     use crate::distance::DistanceType;
     use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
-    use crate::neighbors::cagra::{ExtendParams, IndexParams, SearchParams};
-    use crate::neighbors::filters::{Bitset, Filter};
+    use crate::neighbors::cagra::{ExtendParams, IndexParams, SearchFilter, SearchParams};
+    use crate::neighbors::filters::{Bitmap, Bitset, Filter};
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 256;
@@ -653,6 +644,41 @@ mod tests {
     }
 
     #[test]
+    fn search_with_bitmap_filter_returns_validation_error() {
+        let res = Resources::new().unwrap();
+
+        let dataset =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let params = IndexParams::builder().build().unwrap();
+        let dataset_dl = BorrowedDLTensor::try_from(&dataset).unwrap();
+        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+
+        let queries =
+            tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let neighbors =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
+        let distances =
+            tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let bitmap = tch::Tensor::from_slice(&[0b1111i32]).to(tch::Device::Cuda(0));
+
+        let queries_dl = BorrowedDLTensor::try_from(&queries).unwrap();
+        let neighbors_dl = MutBorrowedDLTensor::try_from(&neighbors).unwrap();
+        let distances_dl = MutBorrowedDLTensor::try_from(&distances).unwrap();
+
+        let err = index
+            .search(
+                &res,
+                &SearchParams::builder().build().unwrap(),
+                &queries_dl,
+                &neighbors_dl,
+                &distances_dl,
+                &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, CagraError::Validation(_)));
+    }
+
+    #[test]
     fn merge_two_indices() {
         let res = Resources::new().unwrap();
         let params = IndexParams::builder().build().unwrap();
@@ -684,5 +710,34 @@ mod tests {
         let search_params = SearchParams::builder().build().unwrap();
         let buf = search_neighbor_indices(&merged, &res, &search_params, &queries);
         assert_neighbor_indices_in_range(&buf, N_ROWS * 2);
+    }
+
+    #[test]
+    fn merge_with_bitmap_filter_returns_validation_error() {
+        let res = Resources::new().unwrap();
+        let params = IndexParams::builder().build().unwrap();
+
+        let dataset_a =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let dataset_b =
+            tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
+
+        let dl_a = BorrowedDLTensor::try_from(&dataset_a).unwrap();
+        let dl_b = BorrowedDLTensor::try_from(&dataset_b).unwrap();
+
+        let index_a = Index::build(&res, &params, &dl_a).unwrap();
+        let index_b = Index::build(&res, &params, &dl_b).unwrap();
+        let bitmap = tch::Tensor::from_slice(&[0b1111i32]).to(tch::Device::Cuda(0));
+
+        let err = match Index::merge(
+            &res,
+            &params,
+            &[&index_a, &index_b],
+            &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
+        ) {
+            Ok(_) => panic!("expected bitmap filter to be rejected for CAGRA merge"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, CagraError::Validation(_)));
     }
 }

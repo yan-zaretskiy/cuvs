@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::distance::DistanceType;
 use crate::dlpack::{AsDLTensor, AsMutDLTensor, DLTensorFfi};
 use crate::error::{LibraryError, check_cuvs};
-use crate::neighbors::filters::{Bitmap, Bitset, Filter};
+pub use crate::neighbors::filters::SearchFilter;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
@@ -28,29 +28,6 @@ pub enum BruteForceError {
     /// A file path contained an interior NUL byte.
     #[error("path contains interior NUL byte")]
     InvalidPath(#[from] std::ffi::NulError),
-}
-
-/// Optional prefilter applied during brute-force search.
-pub enum SearchFilter<'a> {
-    /// Search without filtering.
-    None,
-    /// Reuse one row-level bitset for every query.
-    Bitset(Filter<'a, Bitset>),
-    /// Use a per-query bitmap of allowed `(query, row)` pairs.
-    Bitmap(Filter<'a, Bitmap>),
-}
-
-impl SearchFilter<'_> {
-    fn to_ffi(&self) -> ffi::cuvsFilter {
-        match self {
-            Self::None => ffi::cuvsFilter {
-                addr: 0,
-                type_: ffi::cuvsFilterType::NO_FILTER,
-            },
-            Self::Bitset(f) => f.as_cuvs_filter(),
-            Self::Bitmap(f) => f.as_cuvs_filter(),
-        }
-    }
 }
 
 /// A brute force nearest neighbor index.
@@ -118,7 +95,7 @@ impl<'d> Index<'d> {
                 queries.ffi_ptr(),
                 neighbors.ffi_ptr(),
                 distances.ffi_ptr(),
-                filter.to_ffi(),
+                filter.as_cuvs_filter(),
             )
         };
         check_cuvs(status)?;
@@ -179,6 +156,7 @@ mod tests {
     use crate::distance::DistanceType;
     use crate::dlpack::{BorrowedDLTensor, MutBorrowedDLTensor};
     use crate::neighbors::cagra;
+    use crate::neighbors::filters::{Bitmap, Bitset, Filter, SearchFilter};
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 256;
