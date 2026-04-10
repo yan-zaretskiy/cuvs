@@ -205,7 +205,6 @@ impl Drop for Index<'_> {
 mod tests {
     use super::*;
     use crate::distance::DistanceType;
-    use crate::dlpack::{DLTensorView, DLTensorViewMut};
     use crate::neighbors::cagra;
     use crate::neighbors::filters::{Bitmap, Bitset, Filter, SearchFilter};
     use crate::resources::Resources;
@@ -239,21 +238,24 @@ mod tests {
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
         let index = Index::build(&res, &dataset, DistanceType::L2Expanded).unwrap();
         index
-            .search(&res, &queries, &neighbors, &distances)
+            .search(&res, &queries, &mut neighbors, &mut distances)
             .unwrap();
 
         // Verify: all neighbor indices are in range [0, N_ROWS).
         let buf: Vec<Vec<i64>> = Vec::try_from(&neighbors).unwrap();
         for &idx in buf.iter().flatten() {
-            assert!((0..N_ROWS).contains(&idx), "neighbor index {idx} out of range");
+            assert!(
+                (0..N_ROWS).contains(&idx),
+                "neighbor index {idx} out of range"
+            );
         }
 
         // Verify: distances are non-negative for L2.
@@ -268,9 +270,9 @@ mod tests {
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
@@ -284,12 +286,15 @@ mod tests {
 
         let index = Index::build(&res, &dataset_view, DistanceType::L2Expanded).unwrap();
         index
-            .search(&res, &queries, &neighbors, &distances)
+            .search(&res, &queries, &mut neighbors, &mut distances)
             .unwrap();
 
         let indices = extract_neighbor_indices(&neighbors, N_QUERIES, K);
         for &idx in &indices {
-            assert!((0..N_ROWS).contains(&idx), "neighbor index {idx} out of range");
+            assert!(
+                (0..N_ROWS).contains(&idx),
+                "neighbor index {idx} out of range"
+            );
         }
     }
 
@@ -297,23 +302,18 @@ mod tests {
     fn search_with_bitset_filter_excludes_filtered_rows() {
         let dataset = exact_filter_dataset();
         let queries = exact_filter_queries();
-        let neighbors = tch::Tensor::zeros([2, 1], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances = tch::Tensor::zeros([2, 1], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let mut neighbors = tch::Tensor::zeros([2, 1], (tch::Kind::Int64, tch::Device::Cuda(0)));
+        let mut distances = tch::Tensor::zeros([2, 1], (tch::Kind::Float, tch::Device::Cuda(0)));
         let bitset = tch::Tensor::from_slice(&[0b0110i32]).to(tch::Device::Cuda(0));
 
         let res = Resources::new().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &dataset_dl, DistanceType::L2Expanded).unwrap();
-
-        let queries_dl = DLTensorView::try_from(&queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
+        let index = Index::build(&res, &dataset, DistanceType::L2Expanded).unwrap();
         index
             .search_filtered(
                 &res,
-                &queries_dl,
-                neighbors_dl,
-                distances_dl,
+                &queries,
+                &mut neighbors,
+                &mut distances,
                 &SearchFilter::Bitset(Filter::<Bitset>::new(&bitset).unwrap()),
             )
             .unwrap();
@@ -326,8 +326,8 @@ mod tests {
     fn search_with_bitmap_filter_uses_per_query_masks() {
         let dataset = exact_filter_dataset();
         let queries = exact_filter_queries();
-        let neighbors = tch::Tensor::zeros([2, 1], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances = tch::Tensor::zeros([2, 1], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let mut neighbors = tch::Tensor::zeros([2, 1], (tch::Kind::Int64, tch::Device::Cuda(0)));
+        let mut distances = tch::Tensor::zeros([2, 1], (tch::Kind::Float, tch::Device::Cuda(0)));
         let bitmap = tch::Tensor::from_slice(&[0b0010_0100i32]).to(tch::Device::Cuda(0));
 
         let res = Resources::new().unwrap();
@@ -336,8 +336,8 @@ mod tests {
             .search_filtered(
                 &res,
                 &queries,
-                &neighbors,
-                &distances,
+                &mut neighbors,
+                &mut distances,
                 &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
             )
             .unwrap();

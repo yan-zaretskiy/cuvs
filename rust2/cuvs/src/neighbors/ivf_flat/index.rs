@@ -297,7 +297,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::dlpack::{DLTensorView, DLTensorViewMut};
     use crate::neighbors::filters::{Bitmap, Bitset, Filter, SearchFilter};
     use crate::resources::Resources;
 
@@ -313,17 +312,13 @@ mod tests {
         search_params: &SearchParams,
         queries: &tch::Tensor,
     ) -> Vec<i64> {
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let queries_dl = DLTensorView::try_from(queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
-
         index
-            .search(res, search_params, &queries_dl, neighbors_dl, distances_dl)
+            .search(res, search_params, queries, &mut neighbors, &mut distances)
             .unwrap();
 
         Vec::<Vec<i64>>::try_from(&neighbors)
@@ -364,8 +359,7 @@ mod tests {
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
         assert!(index.n_lists().unwrap() > 0);
@@ -383,8 +377,7 @@ mod tests {
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
         assert_eq!(index.n_lists().unwrap(), N_ROWS);
@@ -404,8 +397,7 @@ mod tests {
         let index = {
             let dataset =
                 tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-            let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-            Index::build(&res, &params, &dataset_dl).unwrap()
+            Index::build(&res, &params, &dataset).unwrap()
         };
 
         let queries =
@@ -421,8 +413,7 @@ mod tests {
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let path = temp_path("ivf-flat-roundtrip");
         index.serialize(&res, &path).unwrap();
@@ -446,8 +437,7 @@ mod tests {
 
         let n_lists = 16u32;
         let params = IndexParams::builder().n_lists(n_lists).build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let centers = index.centers().unwrap();
         assert_eq!(centers.shape(), &[n_lists as i64, DIM]);
@@ -459,8 +449,7 @@ mod tests {
 
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let mut index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let mut index = Index::build(&res, &params, &dataset).unwrap();
 
         let new_vectors =
             tch::Tensor::randn([EXTRA_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
@@ -469,11 +458,7 @@ mod tests {
             N_ROWS + EXTRA_ROWS,
             (tch::Kind::Int64, tch::Device::Cuda(0)),
         );
-        let new_vectors_dl = DLTensorView::try_from(&new_vectors).unwrap();
-        let new_indices_dl = DLTensorView::try_from(&new_indices).unwrap();
-        index
-            .extend(&res, &new_vectors_dl, &new_indices_dl)
-            .unwrap();
+        index.extend(&res, &new_vectors, &new_indices).unwrap();
 
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
@@ -492,25 +477,20 @@ mod tests {
         let queries = tch::Tensor::from_slice(&[0.0f32, 30.0])
             .view([2, 1])
             .to(tch::Device::Cuda(0));
-        let neighbors = tch::Tensor::zeros([2, 1], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances = tch::Tensor::zeros([2, 1], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let mut neighbors = tch::Tensor::zeros([2, 1], (tch::Kind::Int64, tch::Device::Cuda(0)));
+        let mut distances = tch::Tensor::zeros([2, 1], (tch::Kind::Float, tch::Device::Cuda(0)));
         let bitset = tch::Tensor::from_slice(&[0b0110i32]).to(tch::Device::Cuda(0));
 
         let params = IndexParams::builder().n_lists(2).build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
-
-        let queries_dl = DLTensorView::try_from(&queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         index
             .search_filtered(
                 &res,
                 &SearchParams::builder().n_probes(2).build().unwrap(),
-                &queries_dl,
-                neighbors_dl,
-                distances_dl,
+                &queries,
+                &mut neighbors,
+                &mut distances,
                 &SearchFilter::Bitset(Filter::<Bitset>::new(&bitset).unwrap()),
             )
             .unwrap();
@@ -526,27 +506,22 @@ mod tests {
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
         let bitmap = tch::Tensor::from_slice(&[0b1111i32]).to(tch::Device::Cuda(0));
 
         let params = IndexParams::builder().n_lists(16).build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
-
-        let queries_dl = DLTensorView::try_from(&queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let err = index
             .search_filtered(
                 &res,
                 &SearchParams::builder().n_probes(16).build().unwrap(),
-                &queries_dl,
-                neighbors_dl,
-                distances_dl,
+                &queries,
+                &mut neighbors,
+                &mut distances,
                 &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
             )
             .unwrap_err();

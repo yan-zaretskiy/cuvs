@@ -523,7 +523,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::dlpack::{DLPackError, DLTensorView, DLTensorViewMut, IntoDlTensorMut};
+    use crate::dlpack::{DLPackError, DLTensorViewMut, IntoDlTensorMut};
     use crate::resources::Resources;
 
     const N_ROWS: i64 = 1024;
@@ -533,13 +533,13 @@ mod tests {
     const EXTRA_ROWS: i64 = 64;
 
     struct U32TensorView<'a> {
-        tensor: &'a tch::Tensor,
+        tensor: &'a mut tch::Tensor,
         shape: Vec<i64>,
         strides: Option<Vec<i64>>,
     }
 
     impl<'a> U32TensorView<'a> {
-        fn new(tensor: &'a tch::Tensor) -> Self {
+        fn new(tensor: &'a mut tch::Tensor) -> Self {
             assert_eq!(tensor.kind(), tch::Kind::Int);
 
             let shape = tensor.size();
@@ -589,17 +589,13 @@ mod tests {
         search_params: &SearchParams,
         queries: &tch::Tensor,
     ) -> Vec<i64> {
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let queries_dl = DLTensorView::try_from(queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
-
         index
-            .search(res, search_params, &queries_dl, neighbors_dl, distances_dl)
+            .search(res, search_params, queries, &mut neighbors, &mut distances)
             .unwrap();
 
         Vec::<Vec<i64>>::try_from(&neighbors)
@@ -659,8 +655,7 @@ mod tests {
             .pq_dim(8)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
         assert!(index.n_lists().unwrap() > 0);
@@ -682,8 +677,7 @@ mod tests {
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
         assert_eq!(index.size().unwrap(), N_ROWS);
@@ -707,8 +701,7 @@ mod tests {
         let index = {
             let dataset =
                 tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-            let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-            Index::build(&res, &params, &dataset_dl).unwrap()
+            Index::build(&res, &params, &dataset).unwrap()
         };
 
         let queries =
@@ -728,8 +721,7 @@ mod tests {
             .pq_dim(8)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let path = temp_path("ivf-pq-roundtrip");
         index.serialize(&res, &path).unwrap();
@@ -758,8 +750,7 @@ mod tests {
             .pq_dim(8)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let centers = index.centers().unwrap();
         assert_eq!(centers.ndim(), 2);
@@ -794,8 +785,7 @@ mod tests {
             .pq_dim(8)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let mut index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let mut index = Index::build(&res, &params, &dataset).unwrap();
 
         let new_vectors =
             tch::Tensor::randn([EXTRA_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
@@ -804,11 +794,7 @@ mod tests {
             N_ROWS + EXTRA_ROWS,
             (tch::Kind::Int64, tch::Device::Cuda(0)),
         );
-        let new_vectors_dl = DLTensorView::try_from(&new_vectors).unwrap();
-        let new_indices_dl = DLTensorView::try_from(&new_indices).unwrap();
-        index
-            .extend(&res, &new_vectors_dl, &new_indices_dl)
-            .unwrap();
+        index.extend(&res, &new_vectors, &new_indices).unwrap();
 
         assert_eq!(index.size().unwrap(), N_ROWS + EXTRA_ROWS);
         assert_eq!(index.dims().unwrap(), DIM);
@@ -830,8 +816,7 @@ mod tests {
             .pq_dim(8)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let label = find_nonempty_label(&index);
         let list_indices = index.list_indices(label).unwrap();
@@ -839,13 +824,12 @@ mod tests {
         assert!(list_indices.shape()[0] > 0);
 
         let n_take = list_indices.shape()[0].min(4);
-        let codes = tch::Tensor::zeros(
+        let mut codes = tch::Tensor::zeros(
             [n_take, encoded_width(&index)],
             (tch::Kind::Uint8, tch::Device::Cuda(0)),
         );
-        let codes_dl = DLTensorViewMut::try_from(&codes).unwrap();
         index
-            .unpack_contiguous_list_data(&res, codes_dl, label, 0)
+            .unpack_contiguous_list_data(&res, &mut codes, label, 0)
             .unwrap();
 
         assert_eq!(codes.size(), vec![n_take, encoded_width(&index)]);
@@ -861,20 +845,18 @@ mod tests {
             .pq_dim(8)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let invalid_label = index.n_lists().unwrap() as u32;
         let err = index.list_indices(invalid_label).unwrap_err();
         assert!(matches!(err, IvfPqError::Validation(_)));
 
-        let codes = tch::Tensor::zeros(
+        let mut codes = tch::Tensor::zeros(
             [1, encoded_width(&index)],
             (tch::Kind::Uint8, tch::Device::Cuda(0)),
         );
-        let codes_dl = DLTensorViewMut::try_from(&codes).unwrap();
         let err = index
-            .unpack_contiguous_list_data(&res, codes_dl, invalid_label, 0)
+            .unpack_contiguous_list_data(&res, &mut codes, invalid_label, 0)
             .unwrap_err();
         assert!(matches!(err, IvfPqError::Validation(_)));
     }
@@ -889,19 +871,17 @@ mod tests {
             .pq_dim(8)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
-        let labels_storage = tch::Tensor::zeros([N_ROWS], (tch::Kind::Int, tch::Device::Cuda(0)));
-        let labels_dl = U32TensorView::new(&labels_storage);
-        let codes = tch::Tensor::zeros(
+        let mut labels_storage =
+            tch::Tensor::zeros([N_ROWS], (tch::Kind::Int, tch::Device::Cuda(0)));
+        let labels_dl = U32TensorView::new(&mut labels_storage);
+        let mut codes = tch::Tensor::zeros(
             [N_ROWS, encoded_width(&index)],
             (tch::Kind::Uint8, tch::Device::Cuda(0)),
         );
-        let codes_dl = DLTensorViewMut::try_from(&codes).unwrap();
-
         index
-            .transform(&res, &dataset_dl, labels_dl, codes_dl)
+            .transform(&res, &dataset, labels_dl, &mut codes)
             .unwrap();
 
         let labels: Vec<i32> = Vec::try_from(&labels_storage).unwrap();
@@ -924,8 +904,7 @@ mod tests {
             .add_data_on_build(false)
             .build()
             .unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let template = Index::build(&res, &params, &dataset_dl).unwrap();
+        let template = Index::build(&res, &params, &dataset).unwrap();
         assert_eq!(template.size().unwrap(), 0);
 
         let pq_centers = template.pq_centers().unwrap();
@@ -945,8 +924,7 @@ mod tests {
         .unwrap();
 
         let indices = tch::Tensor::arange(N_ROWS, (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let indices_dl = DLTensorView::try_from(&indices).unwrap();
-        index.extend(&res, &dataset_dl, &indices_dl).unwrap();
+        index.extend(&res, &dataset, &indices).unwrap();
 
         assert_eq!(index.size().unwrap(), N_ROWS);
         assert_eq!(index.dims().unwrap(), DIM);

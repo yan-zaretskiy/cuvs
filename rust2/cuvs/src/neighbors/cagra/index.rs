@@ -383,7 +383,6 @@ mod tests {
 
     use super::*;
     use crate::distance::DistanceType;
-    use crate::dlpack::{DLTensorView, DLTensorViewMut};
     use crate::neighbors::cagra::{ExtendParams, IndexParams, SearchFilter, SearchParams};
     use crate::neighbors::filters::{Bitmap, Bitset, Filter};
     use crate::resources::Resources;
@@ -400,17 +399,13 @@ mod tests {
         search_params: &SearchParams,
         queries: &tch::Tensor,
     ) -> Vec<i64> {
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let queries_dl = DLTensorView::try_from(queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
-
         index
-            .search(res, search_params, &queries_dl, neighbors_dl, distances_dl)
+            .search(res, search_params, queries, &mut neighbors, &mut distances)
             .unwrap();
 
         Vec::<Vec<i64>>::try_from(&neighbors)
@@ -427,22 +422,18 @@ mod tests {
         queries: &tch::Tensor,
         filter: &SearchFilter<'_>,
     ) -> Vec<i64> {
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
-
-        let queries_dl = DLTensorView::try_from(queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
 
         index
             .search_filtered(
                 res,
                 search_params,
-                &queries_dl,
-                neighbors_dl,
-                distances_dl,
+                queries,
+                &mut neighbors,
+                &mut distances,
                 filter,
             )
             .unwrap();
@@ -493,8 +484,7 @@ mod tests {
 
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         assert_eq!(index.dims().unwrap(), DIM);
         assert_eq!(index.size().unwrap(), N_ROWS);
@@ -519,8 +509,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
         assert_eq!(index.dims().unwrap(), DIM);
     }
 
@@ -536,8 +525,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
         assert_eq!(index.dims().unwrap(), DIM);
     }
 
@@ -546,8 +534,7 @@ mod tests {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let dataset_view = index.dataset().unwrap();
         assert_eq!(dataset_view.shape(), &[N_ROWS, DIM]);
@@ -569,8 +556,7 @@ mod tests {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let dataset_view = index.dataset().unwrap();
         let graph_view = index.graph().unwrap();
@@ -600,8 +586,7 @@ mod tests {
         let index = {
             let dataset =
                 tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-            let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-            Index::build(&res, &params, &dataset_dl).unwrap()
+            Index::build(&res, &params, &dataset).unwrap()
         };
 
         let queries =
@@ -617,8 +602,7 @@ mod tests {
         let res = Resources::new().unwrap();
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let path = temp_index_path("cagra-roundtrip");
         index.serialize(&res, &path, true).unwrap();
@@ -646,16 +630,13 @@ mod tests {
 
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let mut index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let mut index = Index::build(&res, &params, &dataset).unwrap();
 
         let additional_dataset =
             tch::Tensor::randn([EXTRA_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let extend_params = ExtendParams::builder().max_chunk_size(32).build().unwrap();
-        let additional_dataset_dl = DLTensorView::try_from(&additional_dataset).unwrap();
-
         index
-            .extend(&res, &extend_params, &additional_dataset_dl)
+            .extend(&res, &extend_params, &additional_dataset)
             .unwrap();
 
         assert_eq!(index.size().unwrap(), N_ROWS + EXTRA_ROWS);
@@ -674,8 +655,7 @@ mod tests {
 
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let search_params = SearchParams::builder().itopk_size(64).build().unwrap();
 
@@ -693,8 +673,7 @@ mod tests {
 
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
@@ -719,28 +698,23 @@ mod tests {
 
         let dataset = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let params = IndexParams::builder().build().unwrap();
-        let dataset_dl = DLTensorView::try_from(&dataset).unwrap();
-        let index = Index::build(&res, &params, &dataset_dl).unwrap();
+        let index = Index::build(&res, &params, &dataset).unwrap();
 
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let neighbors =
+        let mut neighbors =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Int64, tch::Device::Cuda(0)));
-        let distances =
+        let mut distances =
             tch::Tensor::zeros([N_QUERIES, K], (tch::Kind::Float, tch::Device::Cuda(0)));
         let bitmap = tch::Tensor::from_slice(&[0b1111i32]).to(tch::Device::Cuda(0));
-
-        let queries_dl = DLTensorView::try_from(&queries).unwrap();
-        let neighbors_dl = DLTensorViewMut::try_from(&neighbors).unwrap();
-        let distances_dl = DLTensorViewMut::try_from(&distances).unwrap();
 
         let err = index
             .search_filtered(
                 &res,
                 &SearchParams::builder().build().unwrap(),
-                &queries_dl,
-                neighbors_dl,
-                distances_dl,
+                &queries,
+                &mut neighbors,
+                &mut distances,
                 &SearchFilter::Bitmap(Filter::<Bitmap>::new(&bitmap).unwrap()),
             )
             .unwrap_err();
@@ -755,11 +729,8 @@ mod tests {
         let dataset_a = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let dataset_b = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let dl_a = DLTensorView::try_from(&dataset_a).unwrap();
-        let dl_b = DLTensorView::try_from(&dataset_b).unwrap();
-
-        let index_a = Index::build(&res, &params, &dl_a).unwrap();
-        let index_b = Index::build(&res, &params, &dl_b).unwrap();
+        let index_a = Index::build(&res, &params, &dataset_a).unwrap();
+        let index_b = Index::build(&res, &params, &dataset_b).unwrap();
 
         let merged = Index::merge(&res, &params, &[&index_a, &index_b]).unwrap();
 
@@ -781,11 +752,8 @@ mod tests {
         let dataset_a = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
         let dataset_b = tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-        let dl_a = DLTensorView::try_from(&dataset_a).unwrap();
-        let dl_b = DLTensorView::try_from(&dataset_b).unwrap();
-
-        let index_a = Index::build(&res, &params, &dl_a).unwrap();
-        let index_b = Index::build(&res, &params, &dl_b).unwrap();
+        let index_a = Index::build(&res, &params, &dataset_a).unwrap();
+        let index_b = Index::build(&res, &params, &dataset_b).unwrap();
         let bitmap = tch::Tensor::from_slice(&[0b1111i32]).to(tch::Device::Cuda(0));
 
         let err = match Index::merge_filtered(

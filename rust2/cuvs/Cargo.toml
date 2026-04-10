@@ -22,7 +22,7 @@ ndarray = { version = "0.17", optional = true }
 tch = { version = "0.24", optional = true }
 torch-sys = { version = "0.24", optional = true }
 thiserror = "2"
-tinyvec = { version = "1", features = ["latest_stable_rust"] }
+tinyvec = { version = "1", features = ["alloc", "latest_stable_rust"] }
 bon = "3.9.1"
 ordered-float = { version = "5.3.0", default-features = false }
 

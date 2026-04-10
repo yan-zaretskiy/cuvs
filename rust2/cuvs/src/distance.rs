@@ -194,10 +194,10 @@ mod tests {
         let k = 8i64;
         let x = tch::Tensor::randn([n, k], (tch::Kind::Float, tch::Device::Cuda(0)));
         let y = tch::Tensor::randn([m, k], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let distances = tch::Tensor::zeros([n, m], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let mut distances = tch::Tensor::zeros([n, m], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
-        pairwise_distance(&res, &x, &y, &distances, DistanceType::L2SqrtUnexpanded).unwrap();
+        pairwise_distance(&res, &x, &y, &mut distances, DistanceType::L2SqrtUnexpanded).unwrap();
 
         let expected = tch::Tensor::cdist(&x, &y, 2.0, None::<i64>);
         let got: Vec<Vec<f32>> = Vec::try_from(&distances).unwrap();
@@ -223,14 +223,14 @@ mod tests {
         let p = 3.0f64;
         let x = tch::Tensor::randn([n, k], (tch::Kind::Float, tch::Device::Cuda(0)));
         let y = tch::Tensor::randn([m, k], (tch::Kind::Float, tch::Device::Cuda(0)));
-        let distances = tch::Tensor::zeros([n, m], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let mut distances = tch::Tensor::zeros([n, m], (tch::Kind::Float, tch::Device::Cuda(0)));
 
         let res = Resources::new().unwrap();
         pairwise_distance(
             &res,
             &x,
             &y,
-            &distances,
+            &mut distances,
             DistanceType::LpUnexpanded(OrderedFloat(p as f32)),
         )
         .unwrap();

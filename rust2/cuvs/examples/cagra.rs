@@ -35,11 +35,19 @@ fn cagra_example() -> Result<(), Box<dyn std::error::Error>> {
     let k = 10;
 
     // Allocate device memory for search outputs
-    let neighbors = tch::Tensor::zeros([n_queries, k], (tch::Kind::Int64, tch::Device::Cuda(0)));
-    let distances = tch::Tensor::zeros([n_queries, k], (tch::Kind::Float, tch::Device::Cuda(0)));
+    let mut neighbors =
+        tch::Tensor::zeros([n_queries, k], (tch::Kind::Int64, tch::Device::Cuda(0)));
+    let mut distances =
+        tch::Tensor::zeros([n_queries, k], (tch::Kind::Float, tch::Device::Cuda(0)));
 
     let search_params = SearchParams::try_new()?;
-    index.search(&res, &search_params, &queries, &neighbors, &distances)?;
+    index.search(
+        &res,
+        &search_params,
+        &queries,
+        &mut neighbors,
+        &mut distances,
+    )?;
 
     println!("Neighbors {:?}", Vec::<Vec<i64>>::try_from(&neighbors)?);
     println!("Distances {:?}", Vec::<Vec<f32>>::try_from(&distances)?);

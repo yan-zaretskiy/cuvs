@@ -156,6 +156,7 @@ static void to_dlpack(MdspanType src, DLManagedTensor* dst)
   tensor->device = accessor_type_to_DLDevice<typename MdspanType::accessor_type>();
   tensor->ndim   = MdspanType::extents_type::rank();
   tensor->data   = const_cast<typename MdspanType::value_type*>(src.data_handle());
+  tensor->byte_offset = 0;
   tensor->shape  = new int64_t[tensor->ndim];
   for (int64_t i = 0; i < tensor->ndim; ++i) {
     tensor->shape[i] = src.extent(i);
@@ -170,6 +171,7 @@ static void to_dlpack(MdspanType src, DLManagedTensor* dst)
     }
   }
 
+  dst->manager_ctx = nullptr;
   dst->deleter = free_dlmanaged_tensor_metadata;
 }
 }  // namespace cuvs::core::detail

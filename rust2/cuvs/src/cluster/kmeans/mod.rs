@@ -161,7 +161,7 @@ mod torch_tests {
 
         let x = tch::Tensor::randn([N, D], (tch::Kind::Float, dev));
 
-        let centroids = tch::Tensor::zeros([K, D], (tch::Kind::Float, dev));
+        let mut centroids = tch::Tensor::zeros([K, D], (tch::Kind::Float, dev));
 
         let params = Params::builder()
             .n_clusters(K as i32)
@@ -170,11 +170,12 @@ mod torch_tests {
             .build()
             .unwrap();
 
-        let (inertia, n_iter) = fit(&res, &params, &x, None::<&tch::Tensor>, &centroids).unwrap();
+        let (inertia, n_iter) =
+            fit(&res, &params, &x, None::<&tch::Tensor>, &mut centroids).unwrap();
         assert!(n_iter >= 0);
         assert!(inertia.is_finite());
 
-        let labels = tch::Tensor::zeros([N], (tch::Kind::Int, dev));
+        let mut labels = tch::Tensor::zeros([N], (tch::Kind::Int, dev));
 
         let pred_inertia = predict(
             &res,
@@ -182,7 +183,7 @@ mod torch_tests {
             &x,
             None::<&tch::Tensor>,
             &centroids,
-            &labels,
+            &mut labels,
             false,
         )
         .unwrap();
@@ -199,7 +200,7 @@ mod torch_tests {
 
         let x_cpu = tch::Tensor::randn([N, D], (tch::Kind::Float, tch::Device::Cpu));
 
-        let centroids = tch::Tensor::zeros([K, D], (tch::Kind::Float, dev));
+        let mut centroids = tch::Tensor::zeros([K, D], (tch::Kind::Float, dev));
 
         let params = Params::builder()
             .n_clusters(K as i32)
@@ -208,7 +209,7 @@ mod torch_tests {
             .unwrap();
 
         let (_inertia, _n_iter) =
-            fit(&res, &params, &x_cpu, None::<&tch::Tensor>, &centroids).unwrap();
+            fit(&res, &params, &x_cpu, None::<&tch::Tensor>, &mut centroids).unwrap();
     }
 
     #[test]
@@ -219,7 +220,7 @@ mod torch_tests {
         let x = tch::Tensor::randn([N, D], (tch::Kind::Float, dev));
 
         let seed = tch::Tensor::randn([K, D], (tch::Kind::Float, dev));
-        let centroids = seed.shallow_clone();
+        let mut centroids = seed.shallow_clone();
 
         let params = Params::builder()
             .n_clusters(K as i32)
@@ -228,7 +229,8 @@ mod torch_tests {
             .build()
             .unwrap();
 
-        let (_inertia, _n_iter) = fit(&res, &params, &x, None::<&tch::Tensor>, &centroids).unwrap();
+        let (_inertia, _n_iter) =
+            fit(&res, &params, &x, None::<&tch::Tensor>, &mut centroids).unwrap();
         assert!(centroids.allclose(&seed, 1e-5, 1e-5, false));
     }
 
@@ -239,7 +241,7 @@ mod torch_tests {
 
         let x = tch::Tensor::randn([N, D], (tch::Kind::Float, dev));
 
-        let centroids = tch::Tensor::zeros([K, D], (tch::Kind::Float, dev));
+        let mut centroids = tch::Tensor::zeros([K, D], (tch::Kind::Float, dev));
 
         let params = Params::builder()
             .n_clusters(K as i32)
@@ -248,16 +250,16 @@ mod torch_tests {
             .build()
             .unwrap();
 
-        fit(&res, &params, &x, None::<&tch::Tensor>, &centroids).unwrap();
+        fit(&res, &params, &x, None::<&tch::Tensor>, &mut centroids).unwrap();
 
-        let labels = tch::Tensor::zeros([N], (tch::Kind::Int, dev));
+        let mut labels = tch::Tensor::zeros([N], (tch::Kind::Int, dev));
         let inertia = predict(
             &res,
             &params,
             &x,
             None::<&tch::Tensor>,
             &centroids,
-            &labels,
+            &mut labels,
             false,
         )
         .unwrap();
