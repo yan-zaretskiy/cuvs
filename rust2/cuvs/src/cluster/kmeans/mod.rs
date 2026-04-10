@@ -65,17 +65,20 @@ where
     let centroids = centroids.into_dl_tensor_mut()?;
     let mut inertia = 0.0f64;
     let mut n_iter = 0i32;
-    let sw_ptr = sample_weight
-        .as_ref()
-        .map(|w| w.as_ptr())
+    let mut x_c = x.to_c();
+    let mut centroids_c = centroids.to_c();
+    let mut sw_c = sample_weight.as_ref().map(|w| w.to_c());
+    let sw_ptr = sw_c
+        .as_mut()
+        .map(|w| w.as_mut_ptr())
         .unwrap_or(std::ptr::null_mut());
     let status = unsafe {
         ffi::cuvsKMeansFit(
             res.handle(),
             params.as_ptr(),
-            x.as_ptr(),
+            x_c.as_mut_ptr(),
             sw_ptr,
-            centroids.as_ptr(),
+            centroids_c.as_mut_ptr(),
             &mut inertia,
             &mut n_iter,
         )
@@ -108,18 +111,22 @@ where
     let centroids = centroids.into_dl_tensor()?;
     let labels = labels.into_dl_tensor_mut()?;
     let mut inertia = 0.0f64;
-    let sw_ptr = sample_weight
-        .as_ref()
-        .map(|w| w.as_ptr())
+    let mut x_c = x.to_c();
+    let mut centroids_c = centroids.to_c();
+    let mut labels_c = labels.to_c();
+    let mut sw_c = sample_weight.as_ref().map(|w| w.to_c());
+    let sw_ptr = sw_c
+        .as_mut()
+        .map(|w| w.as_mut_ptr())
         .unwrap_or(std::ptr::null_mut());
     let status = unsafe {
         ffi::cuvsKMeansPredict(
             res.handle(),
             params.as_ptr(),
-            x.as_ptr(),
+            x_c.as_mut_ptr(),
             sw_ptr,
-            centroids.as_ptr(),
-            labels.as_ptr(),
+            centroids_c.as_mut_ptr(),
+            labels_c.as_mut_ptr(),
             normalize_weight,
             &mut inertia,
         )
@@ -139,8 +146,14 @@ where
     let x = x.into_dl_tensor()?;
     let centroids = centroids.into_dl_tensor()?;
     let mut cost = 0.0f64;
+    let (mut x_c, mut centroids_c) = (x.to_c(), centroids.to_c());
     let status = unsafe {
-        ffi::cuvsKMeansClusterCost(res.handle(), x.as_ptr(), centroids.as_ptr(), &mut cost)
+        ffi::cuvsKMeansClusterCost(
+            res.handle(),
+            x_c.as_mut_ptr(),
+            centroids_c.as_mut_ptr(),
+            &mut cost,
+        )
     };
     check_cuvs(status)?;
     Ok(cost)

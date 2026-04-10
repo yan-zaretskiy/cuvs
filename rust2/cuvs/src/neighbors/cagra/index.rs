@@ -13,7 +13,7 @@ use crate::dlpack::{
     DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut, ReturnedDLTensor,
 };
 use crate::error::check_cuvs;
-use crate::neighbors::filters::{SearchFilter, no_filter};
+use crate::neighbors::filters::{SearchFilter, prepare_filter};
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
@@ -53,8 +53,14 @@ impl Index {
         let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
+        let mut dataset_c = dataset.to_c();
         let status = unsafe {
-            ffi::cuvsCagraBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
+            ffi::cuvsCagraBuild(
+                res.handle(),
+                params.handle(),
+                dataset_c.as_mut_ptr(),
+                idx.handle,
+            )
         };
         check_cuvs(status)?;
         Ok(idx)
@@ -75,12 +81,13 @@ impl Index {
         let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
+        let (mut graph_c, mut dataset_c) = (graph.to_c(), dataset.to_c());
         let status = unsafe {
             ffi::cuvsCagraIndexFromArgs(
                 res.handle(),
                 metric.into(),
-                graph.as_ptr(),
-                dataset.as_ptr(),
+                graph_c.as_mut_ptr(),
+                dataset_c.as_mut_ptr(),
                 idx.handle,
             )
         };
@@ -124,7 +131,7 @@ impl Index {
         let queries = queries.into_dl_tensor()?;
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
-        self.search_impl(res, params, &queries, &neighbors, &distances, no_filter())
+        self.search_impl(res, params, &queries, &neighbors, &distances, None)
     }
 
     /// Search the index for approximate nearest neighbors with a row filter.
@@ -146,14 +153,7 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         Self::validate_filter_support(filter)?;
-        self.search_impl(
-            res,
-            params,
-            &queries,
-            &neighbors,
-            &distances,
-            filter.as_cuvs_filter(),
-        )
+        self.search_impl(res, params, &queries, &neighbors, &distances, Some(filter))
     }
 
     // -----------------------------------------------------------------
@@ -174,11 +174,12 @@ impl Index {
         D: IntoDlTensor<'a>,
     {
         let additional_dataset = additional_dataset.into_dl_tensor()?;
+        let mut additional_dataset_c = additional_dataset.to_c();
         let status = unsafe {
             ffi::cuvsCagraExtend(
                 res.handle(),
                 params.handle(),
-                additional_dataset.as_ptr(),
+                additional_dataset_c.as_mut_ptr(),
                 self.handle,
             )
         };
@@ -199,7 +200,7 @@ impl Index {
         params: &IndexParams,
         indices: &[&Index],
     ) -> Result<Self, CagraError> {
-        Self::merge_impl(res, params, indices, no_filter())
+        Self::merge_impl(res, params, indices, None)
     }
 
     /// Merge multiple CAGRA indices into a new index using a row filter.
@@ -210,7 +211,7 @@ impl Index {
         filter: &SearchFilter<'_>,
     ) -> Result<Self, CagraError> {
         Self::validate_filter_support(filter)?;
-        Self::merge_impl(res, params, indices, filter.as_cuvs_filter())
+        Self::merge_impl(res, params, indices, Some(filter))
     }
 
     // -----------------------------------------------------------------
@@ -281,16 +282,18 @@ impl Index {
 
     /// Return a non-owning view of the dataset attached to the index.
     pub fn dataset(&self) -> Result<ReturnedDLTensor<'_>, CagraError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsCagraIndexGetDataset(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsCagraIndexGetDataset(self.handle, ptr))
+        }?)
     }
 
     /// Return a non-owning view of the graph stored inside the index.
     pub fn graph(&self) -> Result<ReturnedDLTensor<'_>, CagraError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsCagraIndexGetGraph(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsCagraIndexGetGraph(self.handle, ptr))
+        }?)
     }
 
     // -----------------------------------------------------------------
@@ -313,17 +316,20 @@ impl Index {
         queries: &DLTensorView<'_>,
         neighbors: &DLTensorViewMut<'_>,
         distances: &DLTensorViewMut<'_>,
-        filter: ffi::cuvsFilter,
+        filter: Option<&SearchFilter<'_>>,
     ) -> Result<(), CagraError> {
+        let (mut q, mut n, mut d) = (queries.to_c(), neighbors.to_c(), distances.to_c());
+        let mut filter_managed = None;
+        let cuvs_filter = prepare_filter(filter, &mut filter_managed);
         let status = unsafe {
             ffi::cuvsCagraSearch(
                 res.handle(),
                 params.handle(),
                 self.handle,
-                queries.as_ptr(),
-                neighbors.as_ptr(),
-                distances.as_ptr(),
-                filter,
+                q.as_mut_ptr(),
+                n.as_mut_ptr(),
+                d.as_mut_ptr(),
+                cuvs_filter,
             )
         };
         check_cuvs(status)?;
@@ -334,20 +340,22 @@ impl Index {
         res: &Resources,
         params: &IndexParams,
         indices: &[&Index],
-        filter: ffi::cuvsFilter,
+        filter: Option<&SearchFilter<'_>>,
     ) -> Result<Self, CagraError> {
         let output = Self::create_handle()?;
 
         let mut handles: Vec<ffi::cuvsCagraIndex_t> =
             indices.iter().map(|idx| idx.handle).collect();
 
+        let mut filter_managed = None;
+        let cuvs_filter = prepare_filter(filter, &mut filter_managed);
         let status = unsafe {
             ffi::cuvsCagraMerge(
                 res.handle(),
                 params.handle(),
                 handles.as_mut_ptr(),
                 handles.len(),
-                filter,
+                cuvs_filter,
                 output.handle,
             )
         };

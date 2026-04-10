@@ -13,7 +13,7 @@ use crate::dlpack::{
 };
 use crate::error::check_cuvs;
 use crate::neighbors::filters::SearchFilter;
-use crate::neighbors::filters::no_filter;
+use crate::neighbors::filters::prepare_filter;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
@@ -53,8 +53,14 @@ impl Index {
         let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
+        let mut dataset_c = dataset.to_c();
         let status = unsafe {
-            ffi::cuvsIvfFlatBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
+            ffi::cuvsIvfFlatBuild(
+                res.handle(),
+                params.handle(),
+                dataset_c.as_mut_ptr(),
+                idx.handle,
+            )
         };
         check_cuvs(status)?;
         Ok(idx)
@@ -102,9 +108,9 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dtype();
+        let query_dtype = queries.dtype;
         Self::validate_query_dtype(index_dtype, query_dtype)?;
-        self.search_impl(res, params, &queries, &neighbors, &distances, no_filter())
+        self.search_impl(res, params, &queries, &neighbors, &distances, None)
     }
 
     /// Search the index for approximate nearest neighbors with a row filter.
@@ -126,18 +132,11 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dtype();
+        let query_dtype = queries.dtype;
         Self::validate_query_dtype(index_dtype, query_dtype)?;
         Self::validate_filter_support(filter)?;
 
-        self.search_impl(
-            res,
-            params,
-            &queries,
-            &neighbors,
-            &distances,
-            filter.as_cuvs_filter(),
-        )
+        self.search_impl(res, params, &queries, &neighbors, &distances, Some(filter))
     }
 
     // -----------------------------------------------------------------
@@ -165,11 +164,12 @@ impl Index {
     {
         let new_vectors = new_vectors.into_dl_tensor()?;
         let new_indices = new_indices.into_dl_tensor()?;
+        let (mut new_vectors_c, mut new_indices_c) = (new_vectors.to_c(), new_indices.to_c());
         let status = unsafe {
             ffi::cuvsIvfFlatExtend(
                 res.handle(),
-                new_vectors.as_ptr(),
-                new_indices.as_ptr(),
+                new_vectors_c.as_mut_ptr(),
+                new_indices_c.as_mut_ptr(),
                 self.handle,
             )
         };
@@ -215,9 +215,10 @@ impl Index {
 
     /// Return a non-owning view of the cluster centers.
     pub fn centers(&self) -> Result<ReturnedDLTensor<'_>, IvfFlatError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfFlatIndexGetCenters(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfFlatIndexGetCenters(self.handle, ptr))
+        }?)
     }
 
     // -----------------------------------------------------------------
@@ -263,17 +264,20 @@ impl Index {
         queries: &DLTensorView<'_>,
         neighbors: &DLTensorViewMut<'_>,
         distances: &DLTensorViewMut<'_>,
-        filter: ffi::cuvsFilter,
+        filter: Option<&SearchFilter<'_>>,
     ) -> Result<(), IvfFlatError> {
+        let (mut q, mut n, mut d) = (queries.to_c(), neighbors.to_c(), distances.to_c());
+        let mut filter_managed = None;
+        let cuvs_filter = prepare_filter(filter, &mut filter_managed);
         let status = unsafe {
             ffi::cuvsIvfFlatSearch(
                 res.handle(),
                 params.handle(),
                 self.handle,
-                queries.as_ptr(),
-                neighbors.as_ptr(),
-                distances.as_ptr(),
-                filter,
+                q.as_mut_ptr(),
+                n.as_mut_ptr(),
+                d.as_mut_ptr(),
+                cuvs_filter,
             )
         };
         check_cuvs(status)?;

@@ -49,8 +49,14 @@ impl Index {
     {
         let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
+        let mut dataset_c = dataset.to_c();
         let status = unsafe {
-            ffi::cuvsVamanaBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
+            ffi::cuvsVamanaBuild(
+                res.handle(),
+                params.handle(),
+                dataset_c.as_mut_ptr(),
+                idx.handle,
+            )
         };
         check_cuvs(status)?;
         Ok(idx)

@@ -16,7 +16,7 @@ use crate::distance::DistanceType;
 use crate::dlpack::{DLPackError, DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut};
 use crate::error::{LibraryError, check_cuvs};
 pub use crate::neighbors::filters::SearchFilter;
-use crate::neighbors::filters::no_filter;
+use crate::neighbors::filters::prepare_filter;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
 
@@ -69,10 +69,11 @@ impl<'d> Index<'d> {
             _not_send: PhantomData,
         };
 
+        let mut dataset_c = dataset.to_c();
         let status = unsafe {
             ffi::cuvsBruteForceBuild(
                 res.handle(),
-                dataset.as_ptr(),
+                dataset_c.as_mut_ptr(),
                 metric.into(),
                 metric.metric_arg(),
                 idx.handle,
@@ -102,7 +103,7 @@ impl<'d> Index<'d> {
         let queries = queries.into_dl_tensor()?;
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
-        self.search_impl(res, &queries, &neighbors, &distances, no_filter())
+        self.search_impl(res, &queries, &neighbors, &distances, None)
     }
 
     /// Search the index for nearest neighbors with a row filter.
@@ -122,13 +123,7 @@ impl<'d> Index<'d> {
         let queries = queries.into_dl_tensor()?;
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
-        self.search_impl(
-            res,
-            &queries,
-            &neighbors,
-            &distances,
-            filter.as_cuvs_filter(),
-        )
+        self.search_impl(res, &queries, &neighbors, &distances, Some(filter))
     }
 
     /// Save the index to a file.
@@ -178,16 +173,19 @@ impl<'d> Index<'d> {
         queries: &DLTensorView<'_>,
         neighbors: &DLTensorViewMut<'_>,
         distances: &DLTensorViewMut<'_>,
-        filter: ffi::cuvsFilter,
+        filter: Option<&SearchFilter<'_>>,
     ) -> Result<(), BruteForceError> {
+        let (mut q, mut n, mut d) = (queries.to_c(), neighbors.to_c(), distances.to_c());
+        let mut filter_managed = None;
+        let cuvs_filter = prepare_filter(filter, &mut filter_managed);
         let status = unsafe {
             ffi::cuvsBruteForceSearch(
                 res.handle(),
                 self.handle,
-                queries.as_ptr(),
-                neighbors.as_ptr(),
-                distances.as_ptr(),
-                filter,
+                q.as_mut_ptr(),
+                n.as_mut_ptr(),
+                d.as_mut_ptr(),
+                cuvs_filter,
             )
         };
         check_cuvs(status)?;

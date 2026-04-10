@@ -25,7 +25,6 @@
 //! this same public constructor, so they serve as reference implementations.
 //! See the [`IntoDlTensor`] trait docs for a complete example.
 
-use std::cell::UnsafeCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -150,11 +149,34 @@ pub enum DLPackError {
 }
 
 // ---------------------------------------------------------------------------
+// ManagedTensorRef — lifetime-bound handle for stack-local DLManagedTensor
+// ---------------------------------------------------------------------------
+
+/// A stack-local [`DLManagedTensor`](ffi::DLManagedTensor) whose lifetime is
+/// tied to the originating tensor view.
+///
+/// Returned by [`DLTensorView::to_c`] / [`DLTensorViewMut::to_c`].  The
+/// lifetime parameter ensures the view (which owns the shape and strides
+/// arrays that the C struct points into) outlives this handle.
+pub(crate) struct ManagedTensorRef<'a> {
+    pub(crate) inner: ffi::DLManagedTensor,
+    _borrow: PhantomData<&'a ()>,
+}
+
+impl ManagedTensorRef<'_> {
+    /// Return a mutable pointer suitable for C FFI functions that take
+    /// `DLManagedTensor*`.
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut ffi::DLManagedTensor {
+        &mut self.inner
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared view implementation
 // ---------------------------------------------------------------------------
 
-/// Generates a DLPack tensor view struct with the shared constructor, pointer
-/// accessor, and metadata methods.
+/// Generates a DLPack tensor view struct with the shared constructor and
+/// metadata-to-C conversion method.
 ///
 /// Both [`DLTensorView`] and [`DLTensorViewMut`] have identical layouts and
 /// core operations; only their `PhantomData` marker (and therefore the safety
@@ -167,9 +189,11 @@ macro_rules! dl_tensor_view {
     ) => {
         $(#[$meta])*
         pub struct $name<'a> {
-            shape: TensorDims,
-            strides: Option<TensorDims>,
-            managed: UnsafeCell<ffi::DLManagedTensor>,
+            pub(crate) data: *mut std::ffi::c_void,
+            pub(crate) device: ffi::DLDevice,
+            pub(crate) dtype: ffi::DLDataType,
+            pub(crate) shape: TensorDims,
+            pub(crate) strides: Option<TensorDims>,
             _marker: PhantomData<$marker>,
         }
 
@@ -205,45 +229,38 @@ macro_rules! dl_tensor_view {
                     }
                 }
                 Ok(Self {
+                    data,
+                    device,
+                    dtype,
                     shape: shape.iter().copied().collect(),
                     strides: strides.map(|s| s.iter().copied().collect()),
-                    managed: UnsafeCell::new(ffi::DLManagedTensor {
-                        dl_tensor: ffi::DLTensor {
-                            data,
-                            device,
-                            ndim: shape.len() as i32,
-                            dtype,
-                            // Patched by `as_ptr()` before each FFI call because
-                            // the owning TinyVec addresses change when the struct
-                            // moves.
-                            shape: std::ptr::null_mut(),
-                            strides: std::ptr::null_mut(),
-                            byte_offset: 0,
-                        },
-                        manager_ctx: std::ptr::null_mut(),
-                        deleter: None,
-                    }),
                     _marker: PhantomData,
                 })
             }
 
-            pub(crate) fn as_ptr(&self) -> *mut ffi::DLManagedTensor {
-                let ptr = self.managed.get();
-                // SAFETY: UnsafeCell permits interior mutation.  We re-patch the
-                // shape/strides pointers each time because the owning TinyVec
-                // addresses may have changed if the struct was moved.
-                unsafe {
-                    (*ptr).dl_tensor.shape = self.shape.as_ptr() as *mut _;
-                    (*ptr).dl_tensor.strides = match &self.strides {
-                        Some(s) => s.as_ptr() as *mut _,
-                        None => std::ptr::null_mut(),
-                    };
+            /// Build a stack-local [`DLManagedTensor`] for an FFI call.
+            ///
+            /// The returned [`ManagedTensorRef`] borrows `self`, so the
+            /// compiler ensures the view outlives the C struct and its
+            /// pointers into the shape/strides arrays.
+            pub(crate) fn to_c(&self) -> ManagedTensorRef<'_> {
+                ManagedTensorRef {
+                inner: ffi::DLManagedTensor {
+                    dl_tensor: ffi::DLTensor {
+                        data: self.data,
+                        device: self.device,
+                        ndim: self.shape.len() as i32,
+                        dtype: self.dtype,
+                        shape: self.shape.as_ptr() as *mut _,
+                        strides: self.strides.as_ref()
+                            .map_or(std::ptr::null_mut(), |s| s.as_ptr() as *mut _),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: None,
+                },
+                _borrow: PhantomData,
                 }
-                ptr
-            }
-
-            pub(crate) fn dtype(&self) -> ffi::DLDataType {
-                unsafe { (*self.managed.get()).dl_tensor.dtype }
             }
         }
 
@@ -251,7 +268,7 @@ macro_rules! dl_tensor_view {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.debug_struct(stringify!($name))
                     .field("shape", &self.shape.as_slice())
-                    .field("strides", &self.strides.as_ref().map(TensorDims::as_slice))
+                    .field("strides", &self.strides.as_deref())
                     .finish()
             }
         }
@@ -267,6 +284,7 @@ dl_tensor_view! {
     ///
     /// Suitable for C API parameters that only *read* the data
     /// (e.g. datasets, queries).
+    #[must_use]
     pub struct DLTensorView<'a>(&'a ());
 }
 
@@ -280,6 +298,7 @@ dl_tensor_view! {
     /// Constructed from a mutable reference (`&mut ndarray::ArrayRef` or
     /// `&mut tch::Tensor`). Suitable for C API parameters that *write* results
     /// (e.g. neighbors, distances).
+    #[must_use]
     pub struct DLTensorViewMut<'a>(&'a mut ());
 }
 
@@ -290,9 +309,11 @@ dl_tensor_view! {
 impl<'a> From<DLTensorViewMut<'a>> for DLTensorView<'a> {
     fn from(view: DLTensorViewMut<'a>) -> Self {
         Self {
+            data: view.data,
+            device: view.device,
+            dtype: view.dtype,
             shape: view.shape,
             strides: view.strides,
-            managed: view.managed,
             _marker: PhantomData,
         }
     }
@@ -358,18 +379,26 @@ impl<'a> IntoDlTensor<'a> for &'a ReturnedDLTensor<'a> {
 /// The underlying data is owned elsewhere (for example, by an index), while
 /// this wrapper owns only the returned `DLManagedTensor` metadata and calls the
 /// provided DLPack deleter on drop.
+#[must_use]
 pub struct ReturnedDLTensor<'a> {
     managed: ffi::DLManagedTensor,
     _owner: PhantomData<&'a ()>,
 }
 
 impl<'a> ReturnedDLTensor<'a> {
-    pub(crate) fn from_ffi(
+    /// # Safety
+    ///
+    /// The `init` closure must fully initialize the `DLManagedTensor` when
+    /// it returns `CUVS_SUCCESS`.  In particular, `ndim`, `shape`, `strides`,
+    /// `device`, and `dtype` must describe valid, accessible memory.
+    pub(crate) unsafe fn from_ffi(
         init: impl FnOnce(*mut ffi::DLManagedTensor) -> ffi::cuvsError_t,
     ) -> Result<Self, LibraryError> {
         let mut managed = MaybeUninit::<ffi::DLManagedTensor>::zeroed();
         check_cuvs(init(managed.as_mut_ptr()))?;
         Ok(Self {
+            // SAFETY: the caller's contract guarantees the closure fully
+            // initialized the struct on the success path.
             managed: unsafe { managed.assume_init() },
             _owner: PhantomData,
         })
@@ -628,17 +657,16 @@ mod torch_tests {
         assert_eq!(dl.shape[..], [100, 128]);
         assert!(dl.strides.is_none());
 
-        let managed = unsafe { &*dl.as_ptr() };
+        let managed = dl.to_c();
         assert_eq!(
-            managed.dl_tensor.device.device_type,
+            managed.inner.dl_tensor.device.device_type,
             ffi::DLDeviceType::kDLCPU
         );
-        assert_eq!(managed.dl_tensor.device.device_id, 0);
+        assert_eq!(managed.inner.dl_tensor.device.device_id, 0);
 
-        let dtype = dl.dtype();
-        assert_eq!(dtype.code, ffi::DLDataTypeCode::kDLFloat as u8);
-        assert_eq!(dtype.bits, 32);
-        assert_eq!(dtype.lanes, 1);
+        assert_eq!(dl.dtype.code, ffi::DLDataTypeCode::kDLFloat as u8);
+        assert_eq!(dl.dtype.bits, 32);
+        assert_eq!(dl.dtype.lanes, 1);
     }
 
     #[test]
@@ -657,28 +685,26 @@ mod torch_tests {
         let tensor = tch::Tensor::zeros([2, 2], (tch::Kind::Bool, tch::Device::Cpu));
         let dl = (&tensor).into_dl_tensor().unwrap();
 
-        let dtype = dl.dtype();
-        assert_eq!(dtype.code, ffi::DLDataTypeCode::kDLBool as u8);
-        assert_eq!(dtype.bits, 8);
-        assert_eq!(dtype.lanes, 1);
+        assert_eq!(dl.dtype.code, ffi::DLDataTypeCode::kDLBool as u8);
+        assert_eq!(dl.dtype.bits, 8);
+        assert_eq!(dl.dtype.lanes, 1);
     }
 
     #[test]
-    fn torch_as_ptr_produces_valid_cpu_tensor() {
+    fn torch_to_c_produces_valid_cpu_tensor() {
         let tensor = tch::Tensor::zeros([10, 20], (tch::Kind::Float, tch::Device::Cpu));
         let dl = (&tensor).into_dl_tensor().unwrap();
-        let ptr = dl.as_ptr();
+        let managed = dl.to_c();
 
-        let managed = unsafe { &*ptr };
-        assert_eq!(managed.dl_tensor.ndim, 2);
-        assert!(!managed.dl_tensor.data.is_null());
-        assert!(!managed.dl_tensor.shape.is_null());
-        assert!(managed.dl_tensor.strides.is_null());
-        assert_eq!(unsafe { *managed.dl_tensor.shape }, 10);
-        assert_eq!(unsafe { *managed.dl_tensor.shape.add(1) }, 20);
-        assert_eq!(managed.dl_tensor.byte_offset, 0);
-        assert!(managed.manager_ctx.is_null());
-        assert!(managed.deleter.is_none());
+        assert_eq!(managed.inner.dl_tensor.ndim, 2);
+        assert!(!managed.inner.dl_tensor.data.is_null());
+        assert!(!managed.inner.dl_tensor.shape.is_null());
+        assert!(managed.inner.dl_tensor.strides.is_null());
+        assert_eq!(unsafe { *managed.inner.dl_tensor.shape }, 10);
+        assert_eq!(unsafe { *managed.inner.dl_tensor.shape.add(1) }, 20);
+        assert_eq!(managed.inner.dl_tensor.byte_offset, 0);
+        assert!(managed.inner.manager_ctx.is_null());
+        assert!(managed.inner.deleter.is_none());
     }
 
     #[test]
@@ -689,11 +715,10 @@ mod torch_tests {
         assert_eq!(dl.shape[..], [8, 16]);
         assert!(dl.strides.is_none());
 
-        let ptr = dl.as_ptr();
-        let managed = unsafe { &*ptr };
-        assert_eq!(managed.dl_tensor.ndim, 2);
-        assert!(!managed.dl_tensor.data.is_null());
-        assert!(!managed.dl_tensor.shape.is_null());
+        let managed = dl.to_c();
+        assert_eq!(managed.inner.dl_tensor.ndim, 2);
+        assert!(!managed.inner.dl_tensor.data.is_null());
+        assert!(!managed.inner.dl_tensor.shape.is_null());
     }
 }
 
@@ -710,10 +735,9 @@ mod tests {
         assert_eq!(dl.shape.len(), 2);
         assert_eq!(dl.shape[..], [100, 128]);
 
-        let dtype = dl.dtype();
-        assert_eq!(dtype.code, ffi::DLDataTypeCode::kDLFloat as u8);
-        assert_eq!(dtype.bits, 32);
-        assert_eq!(dtype.lanes, 1);
+        assert_eq!(dl.dtype.code, ffi::DLDataTypeCode::kDLFloat as u8);
+        assert_eq!(dl.dtype.bits, 32);
+        assert_eq!(dl.dtype.lanes, 1);
     }
 
     #[test]
@@ -738,45 +762,39 @@ mod tests {
     fn ndarray_data_ptr_is_non_null() {
         let arr = Array2::<f64>::zeros((4, 4));
         let dl = (&arr).into_dl_tensor().unwrap();
-        let managed = unsafe { &*dl.as_ptr() };
-        assert!(!managed.dl_tensor.data.is_null());
+        assert!(!dl.data.is_null());
     }
 
     #[test]
     fn ndarray_device_is_cpu() {
         let arr = Array2::<f32>::zeros((2, 2));
         let dl = (&arr).into_dl_tensor().unwrap();
-        let managed = unsafe { &*dl.as_ptr() };
-        assert_eq!(
-            managed.dl_tensor.device.device_type,
-            ffi::DLDeviceType::kDLCPU
-        );
-        assert_eq!(managed.dl_tensor.device.device_id, 0);
+        assert_eq!(dl.device.device_type, ffi::DLDeviceType::kDLCPU);
+        assert_eq!(dl.device.device_id, 0);
     }
 
     #[test]
     fn ndarray_byte_offset_is_zero() {
         let arr = Array2::<f32>::zeros((2, 2));
         let dl = (&arr).into_dl_tensor().unwrap();
-        let managed = unsafe { &*dl.as_ptr() };
-        assert_eq!(managed.dl_tensor.byte_offset, 0);
+        let managed = dl.to_c();
+        assert_eq!(managed.inner.dl_tensor.byte_offset, 0);
     }
 
     #[test]
-    fn as_ptr_produces_valid_tensor() {
+    fn to_c_produces_valid_tensor() {
         let arr = Array2::<f32>::zeros((10, 20));
         let dl = (&arr).into_dl_tensor().unwrap();
-        let ptr = dl.as_ptr();
+        let managed = dl.to_c();
 
-        let managed = unsafe { &*ptr };
-        assert_eq!(managed.dl_tensor.ndim, 2);
-        assert!(!managed.dl_tensor.shape.is_null());
-        assert!(managed.dl_tensor.strides.is_null());
-        assert_eq!(unsafe { *managed.dl_tensor.shape }, 10);
-        assert_eq!(unsafe { *managed.dl_tensor.shape.add(1) }, 20);
-        assert_eq!(managed.dl_tensor.dtype.bits, 32);
-        assert!(managed.manager_ctx.is_null());
-        assert!(managed.deleter.is_none());
+        assert_eq!(managed.inner.dl_tensor.ndim, 2);
+        assert!(!managed.inner.dl_tensor.shape.is_null());
+        assert!(managed.inner.dl_tensor.strides.is_null());
+        assert_eq!(unsafe { *managed.inner.dl_tensor.shape }, 10);
+        assert_eq!(unsafe { *managed.inner.dl_tensor.shape.add(1) }, 20);
+        assert_eq!(managed.inner.dl_tensor.dtype.bits, 32);
+        assert!(managed.inner.manager_ctx.is_null());
+        assert!(managed.inner.deleter.is_none());
     }
 
     #[test]
@@ -787,17 +805,17 @@ mod tests {
         assert_eq!(dl.shape[..], [10, 20]);
         assert!(dl.strides.is_none());
 
-        let ptr = dl.as_ptr();
-        let managed = unsafe { &*ptr };
-        assert_eq!(managed.dl_tensor.ndim, 2);
-        assert!(!managed.dl_tensor.data.is_null());
-        assert!(!managed.dl_tensor.shape.is_null());
+        let managed = dl.to_c();
+        assert_eq!(managed.inner.dl_tensor.ndim, 2);
+        assert!(!managed.inner.dl_tensor.data.is_null());
+        assert!(!managed.inner.dl_tensor.shape.is_null());
     }
 
     #[test]
     fn returned_tensor_from_ffi_zeroes_unwritten_fields() {
-        let returned = ReturnedDLTensor::from_ffi(|ptr| {
-            unsafe {
+        // SAFETY: the closure fully initializes every DLManagedTensor field.
+        let returned = unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| {
                 (*ptr).dl_tensor.data = std::ptr::null_mut();
                 (*ptr).dl_tensor.device = ffi::DLDevice {
                     device_type: ffi::DLDeviceType::kDLCPU,
@@ -812,9 +830,9 @@ mod tests {
                 (*ptr).dl_tensor.shape = std::ptr::null_mut();
                 (*ptr).dl_tensor.strides = std::ptr::null_mut();
                 (*ptr).deleter = None;
-            }
-            ffi::cuvsError_t::CUVS_SUCCESS
-        })
+                ffi::cuvsError_t::CUVS_SUCCESS
+            })
+        }
         .unwrap();
 
         assert_eq!(returned.managed.dl_tensor.byte_offset, 0);

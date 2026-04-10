@@ -75,8 +75,14 @@ impl Index {
         let dataset = dataset.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
+        let mut dataset_c = dataset.to_c();
         let status = unsafe {
-            ffi::cuvsIvfPqBuild(res.handle(), params.handle(), dataset.as_ptr(), idx.handle)
+            ffi::cuvsIvfPqBuild(
+                res.handle(),
+                params.handle(),
+                dataset_c.as_mut_ptr(),
+                idx.handle,
+            )
         };
         check_cuvs(status)?;
         Ok(idx)
@@ -122,15 +128,21 @@ impl Index {
         let rotation_matrix = rotation_matrix.into_dl_tensor()?;
         let idx = Self::create_handle()?;
 
+        let (mut pq_centers_c, mut centers_padded_c, mut centers_rot_c, mut rotation_matrix_c) = (
+            pq_centers.to_c(),
+            centers_padded.to_c(),
+            centers_rot.to_c(),
+            rotation_matrix.to_c(),
+        );
         let status = unsafe {
             ffi::cuvsIvfPqBuildPrecomputed(
                 res.handle(),
                 params.handle(),
                 dim,
-                pq_centers.as_ptr(),
-                centers_padded.as_ptr(),
-                centers_rot.as_ptr(),
-                rotation_matrix.as_ptr(),
+                pq_centers_c.as_mut_ptr(),
+                centers_padded_c.as_mut_ptr(),
+                centers_rot_c.as_mut_ptr(),
+                rotation_matrix_c.as_mut_ptr(),
                 idx.handle,
             )
         };
@@ -189,17 +201,18 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dtype();
+        let query_dtype = queries.dtype;
         Self::validate_query_dtype(index_dtype, query_dtype)?;
 
+        let (mut q, mut n, mut d) = (queries.to_c(), neighbors.to_c(), distances.to_c());
         let status = unsafe {
             ffi::cuvsIvfPqSearch(
                 res.handle(),
                 params.handle(),
                 self.handle,
-                queries.as_ptr(),
-                neighbors.as_ptr(),
-                distances.as_ptr(),
+                q.as_mut_ptr(),
+                n.as_mut_ptr(),
+                d.as_mut_ptr(),
             )
         };
         check_cuvs(status)?;
@@ -229,11 +242,12 @@ impl Index {
     {
         let new_vectors = new_vectors.into_dl_tensor()?;
         let new_indices = new_indices.into_dl_tensor()?;
+        let (mut new_vectors_c, mut new_indices_c) = (new_vectors.to_c(), new_indices.to_c());
         let status = unsafe {
             ffi::cuvsIvfPqExtend(
                 res.handle(),
-                new_vectors.as_ptr(),
-                new_indices.as_ptr(),
+                new_vectors_c.as_mut_ptr(),
+                new_indices_c.as_mut_ptr(),
                 self.handle,
             )
         };
@@ -263,17 +277,22 @@ impl Index {
         let input_dataset = input_dataset.into_dl_tensor()?;
         let output_labels = output_labels.into_dl_tensor_mut()?;
         let output_dataset = output_dataset.into_dl_tensor_mut()?;
-        let labels_dtype = output_labels.dtype();
-        let dataset_dtype = output_dataset.dtype();
+        let labels_dtype = output_labels.dtype;
+        let dataset_dtype = output_dataset.dtype;
         Self::validate_transform_output_dtypes(labels_dtype, dataset_dtype)?;
 
+        let (mut input_dataset_c, mut output_labels_c, mut output_dataset_c) = (
+            input_dataset.to_c(),
+            output_labels.to_c(),
+            output_dataset.to_c(),
+        );
         let status = unsafe {
             ffi::cuvsIvfPqTransform(
                 res.handle(),
                 self.handle,
-                input_dataset.as_ptr(),
-                output_labels.as_ptr(),
-                output_dataset.as_ptr(),
+                input_dataset_c.as_mut_ptr(),
+                output_labels_c.as_mut_ptr(),
+                output_dataset_c.as_mut_ptr(),
             )
         };
         check_cuvs(status)?;
@@ -347,52 +366,61 @@ impl Index {
 
     /// Non-owning view of the cluster centers.
     pub fn centers(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfPqIndexGetCenters(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetCenters(self.handle, ptr))
+        }?)
     }
 
     /// Non-owning view of the padded cluster centers.
     pub fn centers_padded(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfPqIndexGetCentersPadded(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetCentersPadded(self.handle, ptr))
+        }?)
     }
 
     /// Non-owning view of the PQ codebook centers.
     pub fn pq_centers(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfPqIndexGetPqCenters(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetPqCenters(self.handle, ptr))
+        }?)
     }
 
     /// Non-owning view of the rotated cluster centers.
     pub fn centers_rot(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfPqIndexGetCentersRot(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetCentersRot(self.handle, ptr))
+        }?)
     }
 
     /// Non-owning view of the rotation matrix.
     pub fn rotation_matrix(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfPqIndexGetRotationMatrix(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetRotationMatrix(self.handle, ptr))
+        }?)
     }
 
     /// Non-owning view of the per-list sizes.
     pub fn list_sizes(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfPqIndexGetListSizes(self.handle, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetListSizes(self.handle, ptr))
+        }?)
     }
 
     /// Non-owning view of the indices stored in a single IVF list.
     pub fn list_indices(&self, label: u32) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
         self.validate_label(label)?;
-        Ok(ReturnedDLTensor::from_ffi(|ptr| unsafe {
-            ffi::cuvsIvfPqIndexGetListIndices(self.handle, label, ptr)
-        })?)
+        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        Ok(unsafe {
+            ReturnedDLTensor::from_ffi(|ptr| {
+                ffi::cuvsIvfPqIndexGetListIndices(self.handle, label, ptr)
+            })
+        }?)
     }
 
     /// Unpack contiguous PQ codes from a single IVF list into `out_codes`.
@@ -414,11 +442,12 @@ impl Index {
     {
         let out_codes = out_codes.into_dl_tensor_mut()?;
         self.validate_label(label)?;
+        let mut out_codes_c = out_codes.to_c();
         let status = unsafe {
             ffi::cuvsIvfPqIndexUnpackContiguousListData(
                 res.handle(),
                 self.handle,
-                out_codes.as_ptr(),
+                out_codes_c.as_mut_ptr(),
                 label,
                 offset,
             )

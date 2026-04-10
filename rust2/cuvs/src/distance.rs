@@ -166,12 +166,13 @@ where
     let x = x.into_dl_tensor()?;
     let y = y.into_dl_tensor()?;
     let distances = distances.into_dl_tensor_mut()?;
+    let (mut x_c, mut y_c, mut distances_c) = (x.to_c(), y.to_c(), distances.to_c());
     let status = unsafe {
         ffi::cuvsPairwiseDistance(
             res.handle(),
-            x.as_ptr(),
-            y.as_ptr(),
-            distances.as_ptr(),
+            x_c.as_mut_ptr(),
+            y_c.as_mut_ptr(),
+            distances_c.as_mut_ptr(),
             metric.into(),
             metric.metric_arg(),
         )
