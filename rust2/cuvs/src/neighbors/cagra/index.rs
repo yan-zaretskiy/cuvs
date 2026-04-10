@@ -6,6 +6,7 @@
 //! CAGRA index: build, search, extend, serialize/deserialize, and accessors.
 
 use std::ffi::CString;
+use std::marker::PhantomData;
 use std::path::Path;
 
 use crate::distance::DistanceType;
@@ -25,33 +26,38 @@ use super::params::{ExtendParams, IndexParams, SearchParams};
 /// CAGRA builds a k-NN graph on the GPU and prunes it to the requested
 /// `graph_degree`. The resulting graph is used for fast approximate search.
 ///
-/// Unlike [`crate::neighbors::brute_force::Index`], the CAGRA index does not
-/// borrow the input tensor. In the current C API-backed bindings, build attempts
-/// to attach an internal copy of the dataset to the index.
-pub struct Index {
+/// The lifetime `'d` ties this index to the dataset (and graph) tensors
+/// passed at construction time. The C library may store a non-owning view
+/// of properly aligned device-resident data, so the dataset must outlive
+/// the index. When an index is deserialized from disk or produced by
+/// [`Index::merge`], the data is self-contained and the lifetime is
+/// `'static`.
+pub struct Index<'d> {
     handle: ffi::cuvsCagraIndex_t,
+    _dataset: PhantomData<&'d ()>,
     _not_send: NotSend,
 }
 
-impl Index {
+impl<'d> Index<'d> {
     // -----------------------------------------------------------------
     // Construction
     // -----------------------------------------------------------------
 
     /// Build a CAGRA index from a dataset tensor.
     ///
-    /// The dataset is copied into the index; the caller may free it after
-    /// this call returns.
-    pub fn build<'a, D>(
+    /// The C library may retain a non-owning view of properly-aligned
+    /// device-resident data. The returned index borrows `dataset` — it
+    /// must outlive the index.
+    pub fn build<D>(
         res: &Resources,
         params: &IndexParams,
         dataset: D,
     ) -> Result<Self, CagraError>
     where
-        D: IntoDlTensor<'a>,
+        D: IntoDlTensor<'d>,
     {
         let dataset = dataset.into_dl_tensor()?;
-        let idx = Self::create_handle()?;
+        let handle = Self::create_raw_handle()?;
 
         let mut dataset_c = dataset.to_c();
         let status = unsafe {
@@ -59,27 +65,34 @@ impl Index {
                 res.handle(),
                 params.handle(),
                 dataset_c.as_mut_ptr(),
-                idx.handle,
+                handle,
             )
         };
         check_cuvs(status)?;
-        Ok(idx)
+        Ok(Self {
+            handle,
+            _dataset: PhantomData,
+            _not_send: PhantomData,
+        })
     }
 
     /// Construct a CAGRA index from an existing graph and dataset.
-    pub fn from_args<'graph, 'dataset, G, D>(
+    ///
+    /// Both the graph and dataset may be retained as non-owning views;
+    /// both must outlive the returned index.
+    pub fn from_args<G, D>(
         res: &Resources,
         metric: DistanceType,
         graph: G,
         dataset: D,
     ) -> Result<Self, CagraError>
     where
-        G: IntoDlTensor<'graph>,
-        D: IntoDlTensor<'dataset>,
+        G: IntoDlTensor<'d>,
+        D: IntoDlTensor<'d>,
     {
         let graph = graph.into_dl_tensor()?;
         let dataset = dataset.into_dl_tensor()?;
-        let idx = Self::create_handle()?;
+        let handle = Self::create_raw_handle()?;
 
         let (mut graph_c, mut dataset_c) = (graph.to_c(), dataset.to_c());
         let status = unsafe {
@@ -88,23 +101,32 @@ impl Index {
                 metric.into(),
                 graph_c.as_mut_ptr(),
                 dataset_c.as_mut_ptr(),
-                idx.handle,
+                handle,
             )
         };
         check_cuvs(status)?;
-        Ok(idx)
+        Ok(Self {
+            handle,
+            _dataset: PhantomData,
+            _not_send: PhantomData,
+        })
     }
 
     /// Deserialize a CAGRA index from a file previously written by
-    /// [`Index::serialize`].
-    pub fn deserialize(res: &Resources, path: impl AsRef<Path>) -> Result<Self, CagraError> {
+    /// [`Index::serialize`]. The deserialized index owns its data, so the
+    /// returned lifetime is `'static`.
+    pub fn deserialize(res: &Resources, path: impl AsRef<Path>) -> Result<Index<'static>, CagraError> {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
-        let idx = Self::create_handle()?;
+        let handle = Self::create_raw_handle()?;
 
         let status =
-            unsafe { ffi::cuvsCagraDeserialize(res.handle(), c_path.as_ptr(), idx.handle) };
+            unsafe { ffi::cuvsCagraDeserialize(res.handle(), c_path.as_ptr(), handle) };
         check_cuvs(status)?;
-        Ok(idx)
+        Ok(Index {
+            handle,
+            _dataset: PhantomData,
+            _not_send: PhantomData,
+        })
     }
 
     // -----------------------------------------------------------------
@@ -194,12 +216,12 @@ impl Index {
     /// Merge multiple CAGRA indices into a new index.
     ///
     /// All input indices must share the same dtype and dimensionality.
-    /// The merged index is written into a freshly created output handle.
+    /// The merged index owns its data, so the returned lifetime is `'static`.
     pub fn merge(
         res: &Resources,
         params: &IndexParams,
-        indices: &[&Index],
-    ) -> Result<Self, CagraError> {
+        indices: &[&Index<'_>],
+    ) -> Result<Index<'static>, CagraError> {
         Self::merge_impl(res, params, indices, None)
     }
 
@@ -207,9 +229,9 @@ impl Index {
     pub fn merge_filtered(
         res: &Resources,
         params: &IndexParams,
-        indices: &[&Index],
+        indices: &[&Index<'_>],
         filter: &SearchFilter<'_>,
-    ) -> Result<Self, CagraError> {
+    ) -> Result<Index<'static>, CagraError> {
         Self::validate_filter_support(filter)?;
         Self::merge_impl(res, params, indices, Some(filter))
     }
@@ -339,10 +361,10 @@ impl Index {
     fn merge_impl(
         res: &Resources,
         params: &IndexParams,
-        indices: &[&Index],
+        indices: &[&Index<'_>],
         filter: Option<&SearchFilter<'_>>,
-    ) -> Result<Self, CagraError> {
-        let output = Self::create_handle()?;
+    ) -> Result<Index<'static>, CagraError> {
+        let handle = Self::create_raw_handle()?;
 
         let mut handles: Vec<ffi::cuvsCagraIndex_t> =
             indices.iter().map(|idx| idx.handle).collect();
@@ -356,25 +378,26 @@ impl Index {
                 handles.as_mut_ptr(),
                 handles.len(),
                 cuvs_filter,
-                output.handle,
+                handle,
             )
         };
         check_cuvs(status)?;
-        Ok(output)
+        Ok(Index {
+            handle,
+            _dataset: PhantomData,
+            _not_send: PhantomData,
+        })
     }
 
-    fn create_handle() -> Result<Self, CagraError> {
+    fn create_raw_handle() -> Result<ffi::cuvsCagraIndex_t, CagraError> {
         let mut handle: ffi::cuvsCagraIndex_t = std::ptr::null_mut();
         let status = unsafe { ffi::cuvsCagraIndexCreate(&mut handle) };
         check_cuvs(status)?;
-        Ok(Self {
-            handle,
-            _not_send: std::marker::PhantomData,
-        })
+        Ok(handle)
     }
 }
 
-impl Drop for Index {
+impl Drop for Index<'_> {
     fn drop(&mut self) {
         let _ = unsafe { ffi::cuvsCagraIndexDestroy(self.handle) };
     }
@@ -402,7 +425,7 @@ mod tests {
     const EXTRA_ROWS: i64 = 64;
 
     fn search_neighbor_indices(
-        index: &Index,
+        index: &Index<'_>,
         res: &Resources,
         search_params: &SearchParams,
         queries: &tch::Tensor,
@@ -424,7 +447,7 @@ mod tests {
     }
 
     fn search_neighbor_indices_with_filter(
-        index: &Index,
+        index: &Index<'_>,
         res: &Resources,
         search_params: &SearchParams,
         queries: &tch::Tensor,
@@ -586,16 +609,23 @@ mod tests {
         assert_neighbor_indices_in_range(&buf, N_ROWS);
     }
 
+    /// Deserialized indices own their data (`'static`) and can be used
+    /// independently of any original dataset.
     #[test]
-    fn search_after_source_dataset_drop() {
+    fn deserialized_index_is_static() {
         let res = Resources::new().unwrap();
         let params = IndexParams::builder().build().unwrap();
 
-        let index = {
+        let path = temp_index_path("cagra-static");
+        {
             let dataset =
                 tch::Tensor::randn([N_ROWS, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
-            Index::build(&res, &params, &dataset).unwrap()
-        };
+            let index = Index::build(&res, &params, &dataset).unwrap();
+            index.serialize(&res, &path, true).unwrap();
+        }
+        // original dataset and index are dropped
+
+        let index: Index<'static> = Index::deserialize(&res, &path).unwrap();
 
         let queries =
             tch::Tensor::randn([N_QUERIES, DIM], (tch::Kind::Float, tch::Device::Cuda(0)));
@@ -603,6 +633,8 @@ mod tests {
 
         let buf = search_neighbor_indices(&index, &res, &search_params, &queries);
         assert_neighbor_indices_in_range(&buf, N_ROWS);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
