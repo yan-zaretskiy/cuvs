@@ -189,7 +189,7 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dl_tensor().dtype;
+        let query_dtype = queries.dtype();
         Self::validate_query_dtype(index_dtype, query_dtype)?;
 
         let status = unsafe {
@@ -263,8 +263,8 @@ impl Index {
         let input_dataset = input_dataset.into_dl_tensor()?;
         let output_labels = output_labels.into_dl_tensor_mut()?;
         let output_dataset = output_dataset.into_dl_tensor_mut()?;
-        let labels_dtype = output_labels.dl_tensor().dtype;
-        let dataset_dtype = output_dataset.dl_tensor().dtype;
+        let labels_dtype = output_labels.dtype();
+        let dataset_dtype = output_dataset.dtype();
         Self::validate_transform_output_dtypes(labels_dtype, dataset_dtype)?;
 
         let status = unsafe {

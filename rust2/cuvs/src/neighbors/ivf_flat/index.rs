@@ -102,7 +102,7 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dl_tensor().dtype;
+        let query_dtype = queries.dtype();
         Self::validate_query_dtype(index_dtype, query_dtype)?;
         self.search_impl(res, params, &queries, &neighbors, &distances, no_filter())
     }
@@ -126,7 +126,7 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dl_tensor().dtype;
+        let query_dtype = queries.dtype();
         Self::validate_query_dtype(index_dtype, query_dtype)?;
         Self::validate_filter_support(filter)?;
 

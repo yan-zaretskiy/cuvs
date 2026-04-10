@@ -21,8 +21,7 @@ fn cagra_example() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Build the CAGRA index
-    let build_params = IndexParams::try_new()?;
-    let index = Index::build(&res, &build_params, &dataset)?;
+    let index = Index::build(&res, &IndexParams::try_new()?, &dataset)?;
     println!(
         "Indexed {}x{} datapoints into CAGRA index",
         n_datapoints, n_features
@@ -40,10 +39,9 @@ fn cagra_example() -> Result<(), Box<dyn std::error::Error>> {
     let mut distances =
         tch::Tensor::zeros([n_queries, k], (tch::Kind::Float, tch::Device::Cuda(0)));
 
-    let search_params = SearchParams::try_new()?;
     index.search(
         &res,
-        &search_params,
+        &SearchParams::try_new()?,
         &queries,
         &mut neighbors,
         &mut distances,
