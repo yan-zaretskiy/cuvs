@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
-use crate::dlpack::{IntoDlTensor, IntoDlTensorMut, ReturnedDLTensor};
+use crate::dlpack::{DLTensorView, IntoDlTensor, IntoDlTensorMut, view_from_ffi};
 use crate::error::check_cuvs;
 use crate::resources::Resources;
 use crate::{NotSend, ffi};
@@ -201,7 +201,7 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dtype;
+        let query_dtype = queries.dtype();
         Self::validate_query_dtype(index_dtype, query_dtype)?;
 
         let (mut q, mut n, mut d) = (queries.to_c(), neighbors.to_c(), distances.to_c());
@@ -277,8 +277,8 @@ impl Index {
         let input_dataset = input_dataset.into_dl_tensor()?;
         let output_labels = output_labels.into_dl_tensor_mut()?;
         let output_dataset = output_dataset.into_dl_tensor_mut()?;
-        let labels_dtype = output_labels.dtype;
-        let dataset_dtype = output_dataset.dtype;
+        let labels_dtype = output_labels.dtype();
+        let dataset_dtype = output_dataset.dtype();
         Self::validate_transform_output_dtypes(labels_dtype, dataset_dtype)?;
 
         let (mut input_dataset_c, mut output_labels_c, mut output_dataset_c) = (
@@ -365,59 +365,68 @@ impl Index {
     // -----------------------------------------------------------------
 
     /// Non-owning view of the cluster centers.
-    pub fn centers(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn centers(&self) -> Result<DLTensorView<'_>, IvfPqError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetCenters(self.handle, ptr))
+            view_from_ffi::<IvfPqError>(|ptr| ffi::cuvsIvfPqIndexGetCenters(self.handle, ptr))
         }?)
     }
 
     /// Non-owning view of the padded cluster centers.
-    pub fn centers_padded(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn centers_padded(&self) -> Result<DLTensorView<'_>, IvfPqError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetCentersPadded(self.handle, ptr))
+            view_from_ffi::<IvfPqError>(|ptr| ffi::cuvsIvfPqIndexGetCentersPadded(self.handle, ptr))
         }?)
     }
 
     /// Non-owning view of the PQ codebook centers.
-    pub fn pq_centers(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn pq_centers(&self) -> Result<DLTensorView<'_>, IvfPqError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetPqCenters(self.handle, ptr))
+            view_from_ffi::<IvfPqError>(|ptr| ffi::cuvsIvfPqIndexGetPqCenters(self.handle, ptr))
         }?)
     }
 
     /// Non-owning view of the rotated cluster centers.
-    pub fn centers_rot(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn centers_rot(&self) -> Result<DLTensorView<'_>, IvfPqError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetCentersRot(self.handle, ptr))
+            view_from_ffi::<IvfPqError>(|ptr| ffi::cuvsIvfPqIndexGetCentersRot(self.handle, ptr))
         }?)
     }
 
     /// Non-owning view of the rotation matrix.
-    pub fn rotation_matrix(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn rotation_matrix(&self) -> Result<DLTensorView<'_>, IvfPqError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetRotationMatrix(self.handle, ptr))
+            view_from_ffi::<IvfPqError>(|ptr| {
+                ffi::cuvsIvfPqIndexGetRotationMatrix(self.handle, ptr)
+            })
         }?)
     }
 
     /// Non-owning view of the per-list sizes.
-    pub fn list_sizes(&self) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn list_sizes(&self) -> Result<DLTensorView<'_>, IvfPqError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfPqIndexGetListSizes(self.handle, ptr))
+            view_from_ffi::<IvfPqError>(|ptr| ffi::cuvsIvfPqIndexGetListSizes(self.handle, ptr))
         }?)
     }
 
     /// Non-owning view of the indices stored in a single IVF list.
-    pub fn list_indices(&self, label: u32) -> Result<ReturnedDLTensor<'_>, IvfPqError> {
+    pub fn list_indices(&self, label: u32) -> Result<DLTensorView<'_>, IvfPqError> {
         self.validate_label(label)?;
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| {
+            view_from_ffi::<IvfPqError>(|ptr| {
                 ffi::cuvsIvfPqIndexGetListIndices(self.handle, label, ptr)
             })
         }?)

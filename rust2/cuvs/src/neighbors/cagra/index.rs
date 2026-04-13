@@ -10,9 +10,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 
 use crate::distance::DistanceType;
-use crate::dlpack::{
-    DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut, ReturnedDLTensor,
-};
+use crate::dlpack::{DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut, view_from_ffi};
 use crate::error::check_cuvs;
 use crate::neighbors::filters::{SearchFilter, prepare_filter};
 use crate::resources::Resources;
@@ -48,11 +46,7 @@ impl<'d> Index<'d> {
     /// The C library may retain a non-owning view of properly-aligned
     /// device-resident data. The returned index borrows `dataset` — it
     /// must outlive the index.
-    pub fn build<D>(
-        res: &Resources,
-        params: &IndexParams,
-        dataset: D,
-    ) -> Result<Self, CagraError>
+    pub fn build<D>(res: &Resources, params: &IndexParams, dataset: D) -> Result<Self, CagraError>
     where
         D: IntoDlTensor<'d>,
     {
@@ -115,12 +109,14 @@ impl<'d> Index<'d> {
     /// Deserialize a CAGRA index from a file previously written by
     /// [`Index::serialize`]. The deserialized index owns its data, so the
     /// returned lifetime is `'static`.
-    pub fn deserialize(res: &Resources, path: impl AsRef<Path>) -> Result<Index<'static>, CagraError> {
+    pub fn deserialize(
+        res: &Resources,
+        path: impl AsRef<Path>,
+    ) -> Result<Index<'static>, CagraError> {
         let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes())?;
         let handle = Self::create_raw_handle()?;
 
-        let status =
-            unsafe { ffi::cuvsCagraDeserialize(res.handle(), c_path.as_ptr(), handle) };
+        let status = unsafe { ffi::cuvsCagraDeserialize(res.handle(), c_path.as_ptr(), handle) };
         check_cuvs(status)?;
         Ok(Index {
             handle,
@@ -303,18 +299,20 @@ impl<'d> Index<'d> {
     }
 
     /// Return a non-owning view of the dataset attached to the index.
-    pub fn dataset(&self) -> Result<ReturnedDLTensor<'_>, CagraError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn dataset(&self) -> Result<DLTensorView<'_>, CagraError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsCagraIndexGetDataset(self.handle, ptr))
+            view_from_ffi::<CagraError>(|ptr| ffi::cuvsCagraIndexGetDataset(self.handle, ptr))
         }?)
     }
 
     /// Return a non-owning view of the graph stored inside the index.
-    pub fn graph(&self) -> Result<ReturnedDLTensor<'_>, CagraError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn graph(&self) -> Result<DLTensorView<'_>, CagraError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsCagraIndexGetGraph(self.handle, ptr))
+            view_from_ffi::<CagraError>(|ptr| ffi::cuvsCagraIndexGetGraph(self.handle, ptr))
         }?)
     }
 

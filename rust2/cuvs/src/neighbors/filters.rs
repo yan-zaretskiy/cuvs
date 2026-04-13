@@ -92,12 +92,12 @@ impl<'a, K: FilterKind> Filter<'a, K> {
     {
         let mut tensor = filter_words.into_dl_tensor()?;
 
-        if tensor.shape.len() != 1 {
+        if tensor.ndim() != 1 {
             return Err(FilterError::InvalidRank);
         }
 
         if !matches!(
-            tensor.device.device_type,
+            tensor.device().device_type,
             ffi::DLDeviceType::kDLCUDA
                 | ffi::DLDeviceType::kDLCUDAHost
                 | ffi::DLDeviceType::kDLCUDAManaged
@@ -105,14 +105,15 @@ impl<'a, K: FilterKind> Filter<'a, K> {
             return Err(FilterError::InvalidDevice);
         }
 
-        if tensor.strides.is_some() {
+        if tensor.strides().is_some() {
             return Err(FilterError::NonContiguous);
         }
 
-        let is_32_bit = tensor.dtype.bits == 32;
-        let is_scalar = tensor.dtype.lanes == 1;
-        let is_int = (tensor.dtype.code == ffi::DLDataTypeCode::kDLInt as u8)
-            || (tensor.dtype.code == ffi::DLDataTypeCode::kDLUInt as u8);
+        let dtype = tensor.dtype();
+        let is_32_bit = dtype.bits == 32;
+        let is_scalar = dtype.lanes == 1;
+        let is_int = (dtype.code == ffi::DLDataTypeCode::kDLInt as u8)
+            || (dtype.code == ffi::DLDataTypeCode::kDLUInt as u8);
 
         if !is_32_bit || !is_scalar || !is_int {
             return Err(FilterError::InvalidDType);
@@ -120,12 +121,12 @@ impl<'a, K: FilterKind> Filter<'a, K> {
 
         // Retag i32 metadata as u32 so all later to_c() calls produce the
         // same bitset representation expected by the C API.
-        if tensor.dtype.code == ffi::DLDataTypeCode::kDLInt as u8 {
-            tensor.dtype = ffi::DLDataType {
+        if dtype.code == ffi::DLDataTypeCode::kDLInt as u8 {
+            tensor.set_dtype(ffi::DLDataType {
                 code: ffi::DLDataTypeCode::kDLUInt as u8,
                 bits: 32,
                 lanes: 1,
-            };
+            });
         }
 
         Ok(Self {
@@ -191,9 +192,10 @@ mod tests {
         let bitset = tch::Tensor::from_slice(&[0b0110i32]).to(tch::Device::Cuda(0));
         let filter = Filter::<Bitset>::new(&bitset).unwrap();
 
-        assert_eq!(filter.tensor.dtype.code, ffi::DLDataTypeCode::kDLUInt as u8);
-        assert_eq!(filter.tensor.dtype.bits, 32);
-        assert_eq!(filter.tensor.dtype.lanes, 1);
+        let dtype = filter.tensor.dtype();
+        assert_eq!(dtype.code, ffi::DLDataTypeCode::kDLUInt as u8);
+        assert_eq!(dtype.bits, 32);
+        assert_eq!(dtype.lanes, 1);
     }
 
     #[test]

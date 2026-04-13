@@ -8,9 +8,7 @@
 use std::ffi::CString;
 use std::path::Path;
 
-use crate::dlpack::{
-    DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut, ReturnedDLTensor,
-};
+use crate::dlpack::{DLTensorView, DLTensorViewMut, IntoDlTensor, IntoDlTensorMut, view_from_ffi};
 use crate::error::check_cuvs;
 use crate::neighbors::filters::SearchFilter;
 use crate::neighbors::filters::prepare_filter;
@@ -108,7 +106,7 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dtype;
+        let query_dtype = queries.dtype();
         Self::validate_query_dtype(index_dtype, query_dtype)?;
         self.search_impl(res, params, &queries, &neighbors, &distances, None)
     }
@@ -132,7 +130,7 @@ impl Index {
         let neighbors = neighbors.into_dl_tensor_mut()?;
         let distances = distances.into_dl_tensor_mut()?;
         let index_dtype = unsafe { (*self.handle).dtype };
-        let query_dtype = queries.dtype;
+        let query_dtype = queries.dtype();
         Self::validate_query_dtype(index_dtype, query_dtype)?;
         Self::validate_filter_support(filter)?;
 
@@ -214,10 +212,11 @@ impl Index {
     }
 
     /// Return a non-owning view of the cluster centers.
-    pub fn centers(&self) -> Result<ReturnedDLTensor<'_>, IvfFlatError> {
-        // SAFETY: the C function fully initializes the DLManagedTensor on success.
+    pub fn centers(&self) -> Result<DLTensorView<'_>, IvfFlatError> {
+        // SAFETY: the C function fully initializes the DLManagedTensor and
+        // the data pointer is valid for &self's lifetime (index-owned).
         Ok(unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| ffi::cuvsIvfFlatIndexGetCenters(self.handle, ptr))
+            view_from_ffi::<IvfFlatError>(|ptr| ffi::cuvsIvfFlatIndexGetCenters(self.handle, ptr))
         }?)
     }
 

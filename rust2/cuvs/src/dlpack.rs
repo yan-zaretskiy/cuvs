@@ -5,16 +5,13 @@
 
 //! DLPack tensor view types.
 //!
-//! Three tensor view types are provided:
+//! Two tensor view types are provided:
 //!
 //! * [`DLTensorView`] — a read-only view created from tensor-like inputs.
 //!   Use for C API parameters that only *read* data (datasets, queries).
 //!
 //! * [`DLTensorViewMut`] — a writable view created from mutable tensor handles.
 //!   Use for C API parameters that *write* results (neighbors, distances).
-//!
-//! * [`ReturnedDLTensor`] — a non-owning view returned by the cuVS C API that
-//!   owns the returned DLPack metadata and runs its deleter on drop.
 //!
 //! # Implementing custom tensor adapters
 //!
@@ -28,6 +25,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+use std::ops::Deref;
 use std::slice;
 
 use tinyvec::TinyVec;
@@ -155,9 +153,10 @@ pub enum DLPackError {
 /// A stack-local [`DLManagedTensor`](ffi::DLManagedTensor) whose lifetime is
 /// tied to the originating tensor view.
 ///
-/// Returned by [`DLTensorView::to_c`] / [`DLTensorViewMut::to_c`].  The
-/// lifetime parameter ensures the view (which owns the shape and strides
-/// arrays that the C struct points into) outlives this handle.
+/// Returned by [`DLTensorView::to_c`]. [`DLTensorViewMut`] reaches the same
+/// method via [`Deref`]. The lifetime parameter ensures the view (which owns
+/// the shape and strides arrays that the C struct points into) outlives this
+/// handle.
 pub(crate) struct ManagedTensorRef<'a> {
     pub(crate) inner: ffi::DLManagedTensor,
     _borrow: PhantomData<&'a ()>,
@@ -172,134 +171,184 @@ impl ManagedTensorRef<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Shared view implementation
-// ---------------------------------------------------------------------------
-
-/// Generates a DLPack tensor view struct with the shared constructor and
-/// metadata-to-C conversion method.
-///
-/// Both [`DLTensorView`] and [`DLTensorViewMut`] have identical layouts and
-/// core operations; only their `PhantomData` marker (and therefore the safety
-/// contract on the referenced data) differs.  Type-specific impls live outside
-/// this macro.
-macro_rules! dl_tensor_view {
-    (
-        $(#[$meta:meta])*
-        pub struct $name:ident<'a>($marker:ty);
-    ) => {
-        $(#[$meta])*
-        pub struct $name<'a> {
-            pub(crate) data: *mut std::ffi::c_void,
-            pub(crate) device: ffi::DLDevice,
-            pub(crate) dtype: ffi::DLDataType,
-            pub(crate) shape: TensorDims,
-            pub(crate) strides: Option<TensorDims>,
-            _marker: PhantomData<$marker>,
-        }
-
-        impl<'a> $name<'a> {
-            /// Construct a DLPack view from raw tensor metadata.
-            ///
-            /// # Safety
-            ///
-            /// The caller must guarantee that:
-            /// - `data` points to initialized tensor storage for the full extent
-            ///   described by `shape`, `strides`, and `dtype`
-            /// - `device`, `shape`, `strides`, and `dtype` accurately describe
-            ///   that storage
-            /// - the underlying storage remains valid for the lifetime `'a`:
-            ///   immutable for [`DLTensorView`], exclusively writable for
-            ///   [`DLTensorViewMut`]
-            /// - the C API fully consumes the `DLManagedTensor*` and its `shape` /
-            ///   `strides` pointers during the FFI call and does not retain them
-            ///   after the call returns
-            pub unsafe fn from_raw_parts(
-                data: *mut std::ffi::c_void,
-                device: ffi::DLDevice,
-                shape: &[i64],
-                strides: Option<&[i64]>,
-                dtype: ffi::DLDataType,
-            ) -> Result<Self, DLPackError> {
-                if let Some(s) = strides {
-                    if s.len() != shape.len() {
-                        return Err(DLPackError::StridesLenMismatch {
-                            ndim: shape.len(),
-                            strides: s.len(),
-                        });
-                    }
-                }
-                Ok(Self {
-                    data,
-                    device,
-                    dtype,
-                    shape: shape.iter().copied().collect(),
-                    strides: strides.map(|s| s.iter().copied().collect()),
-                    _marker: PhantomData,
-                })
-            }
-
-            /// Build a stack-local [`DLManagedTensor`] for an FFI call.
-            ///
-            /// The returned [`ManagedTensorRef`] borrows `self`, so the
-            /// compiler ensures the view outlives the C struct and its
-            /// pointers into the shape/strides arrays.
-            pub(crate) fn to_c(&self) -> ManagedTensorRef<'_> {
-                ManagedTensorRef {
-                inner: ffi::DLManagedTensor {
-                    dl_tensor: ffi::DLTensor {
-                        data: self.data,
-                        device: self.device,
-                        ndim: self.shape.len() as i32,
-                        dtype: self.dtype,
-                        shape: self.shape.as_ptr() as *mut _,
-                        strides: self.strides.as_ref()
-                            .map_or(std::ptr::null_mut(), |s| s.as_ptr() as *mut _),
-                        byte_offset: 0,
-                    },
-                    manager_ctx: std::ptr::null_mut(),
-                    deleter: None,
-                },
-                _borrow: PhantomData,
-                }
-            }
-        }
-
-        impl fmt::Debug for $name<'_> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_struct(stringify!($name))
-                    .field("shape", &self.shape.as_slice())
-                    .field("strides", &self.strides.as_deref())
-                    .finish()
-            }
-        }
-    };
-}
-
-// ---------------------------------------------------------------------------
 // DLTensorView — read-only view for C API inputs
 // ---------------------------------------------------------------------------
 
-dl_tensor_view! {
-    /// A non-owning, read-only DLPack tensor view.
+/// A non-owning, read-only DLPack tensor view.
+///
+/// Suitable for C API parameters that only *read* the data
+/// (e.g. datasets, queries).
+#[must_use]
+pub struct DLTensorView<'a> {
+    data: *mut std::ffi::c_void,
+    device: ffi::DLDevice,
+    dtype: ffi::DLDataType,
+    shape: TensorDims,
+    strides: Option<TensorDims>,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl<'a> DLTensorView<'a> {
+    /// Construct a DLPack view from raw tensor metadata.
     ///
-    /// Suitable for C API parameters that only *read* the data
-    /// (e.g. datasets, queries).
-    #[must_use]
-    pub struct DLTensorView<'a>(&'a ());
+    /// # Safety
+    ///
+    /// The caller must guarantee that:
+    /// - `data` points to initialized tensor storage for the full extent
+    ///   described by `shape`, `strides`, and `dtype`
+    /// - `device`, `shape`, `strides`, and `dtype` accurately describe
+    ///   that storage
+    /// - the underlying storage remains valid for the lifetime `'a`
+    /// - the C API fully consumes the `DLManagedTensor*` and its `shape` /
+    ///   `strides` pointers during the FFI call and does not retain them
+    ///   after the call returns
+    pub unsafe fn from_raw_parts(
+        data: *mut std::ffi::c_void,
+        device: ffi::DLDevice,
+        shape: &[i64],
+        strides: Option<&[i64]>,
+        dtype: ffi::DLDataType,
+    ) -> Result<Self, DLPackError> {
+        if let Some(s) = strides {
+            if s.len() != shape.len() {
+                return Err(DLPackError::StridesLenMismatch {
+                    ndim: shape.len(),
+                    strides: s.len(),
+                });
+            }
+        }
+        Ok(Self {
+            data,
+            device,
+            dtype,
+            shape: shape.iter().copied().collect(),
+            strides: strides.map(|s| s.iter().copied().collect()),
+            _marker: PhantomData,
+        })
+    }
+
+    /// Build a stack-local [`DLManagedTensor`] for an FFI call.
+    ///
+    /// The returned [`ManagedTensorRef`] borrows `self`, so the
+    /// compiler ensures the view outlives the C struct and its
+    /// pointers into the shape/strides arrays.
+    pub(crate) fn to_c(&self) -> ManagedTensorRef<'_> {
+        ManagedTensorRef {
+            inner: ffi::DLManagedTensor {
+                dl_tensor: ffi::DLTensor {
+                    data: self.data,
+                    device: self.device,
+                    ndim: self.shape.len() as i32,
+                    dtype: self.dtype,
+                    shape: self.shape.as_ptr() as *mut _,
+                    strides: self
+                        .strides
+                        .as_ref()
+                        .map_or(std::ptr::null_mut(), |s| s.as_ptr() as *mut _),
+                    byte_offset: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: None,
+            },
+            _borrow: PhantomData,
+        }
+    }
+
+    /// Number of dimensions as a Rust `usize`.
+    ///
+    /// DLPack stores rank as an `i32`, but the safe Rust API exposes it as a
+    /// `usize` for ordinary indexing and slice-length comparisons.
+    pub fn ndim(&self) -> usize {
+        self.shape.len()
+    }
+
+    /// Shape of the tensor (one element per dimension).
+    pub fn shape(&self) -> &[i64] {
+        &self.shape
+    }
+
+    /// Strides, if non-contiguous. `None` means C-contiguous row-major.
+    pub fn strides(&self) -> Option<&[i64]> {
+        self.strides.as_deref()
+    }
+
+    /// Element data type.
+    pub fn dtype(&self) -> ffi::DLDataType {
+        self.dtype
+    }
+
+    /// Override the dtype metadata without changing the underlying storage.
+    pub(crate) fn set_dtype(&mut self, dtype: ffi::DLDataType) {
+        self.dtype = dtype;
+    }
+
+    /// Device where the data resides.
+    pub fn device(&self) -> ffi::DLDevice {
+        self.device
+    }
+}
+
+impl fmt::Debug for DLTensorView<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DLTensorView")
+            .field("shape", &self.shape.as_slice())
+            .field("strides", &self.strides.as_deref())
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // DLTensorViewMut — writable view for C API outputs
 // ---------------------------------------------------------------------------
 
-dl_tensor_view! {
-    /// A non-owning, writable DLPack tensor view.
+/// A non-owning, writable DLPack tensor view.
+///
+/// This wraps a read-only [`DLTensorView`] plus an exclusive borrow marker,
+/// which keeps the shared behavior in one place without letting writable views
+/// lose their stronger aliasing contract.
+#[must_use]
+pub struct DLTensorViewMut<'a> {
+    base: DLTensorView<'a>,
+    _unique: PhantomData<&'a mut ()>,
+}
+
+impl<'a> DLTensorViewMut<'a> {
+    /// Construct a writable DLPack view from raw tensor metadata.
     ///
-    /// Constructed from a mutable reference (`&mut ndarray::ArrayRef` or
-    /// `&mut tch::Tensor`). Suitable for C API parameters that *write* results
-    /// (e.g. neighbors, distances).
-    #[must_use]
-    pub struct DLTensorViewMut<'a>(&'a mut ());
+    /// # Safety
+    ///
+    /// In addition to the [`DLTensorView::from_raw_parts`] invariants, the
+    /// caller must guarantee the underlying storage is exclusively writable for
+    /// the lifetime `'a`.
+    pub unsafe fn from_raw_parts(
+        data: *mut std::ffi::c_void,
+        device: ffi::DLDevice,
+        shape: &[i64],
+        strides: Option<&[i64]>,
+        dtype: ffi::DLDataType,
+    ) -> Result<Self, DLPackError> {
+        Ok(Self {
+            base: unsafe { DLTensorView::from_raw_parts(data, device, shape, strides, dtype)? },
+            _unique: PhantomData,
+        })
+    }
+}
+
+impl<'a> Deref for DLTensorViewMut<'a> {
+    type Target = DLTensorView<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl fmt::Debug for DLTensorViewMut<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DLTensorViewMut")
+            .field("shape", &self.base.shape.as_slice())
+            .field("strides", &self.base.strides.as_deref())
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,14 +357,7 @@ dl_tensor_view! {
 
 impl<'a> From<DLTensorViewMut<'a>> for DLTensorView<'a> {
     fn from(view: DLTensorViewMut<'a>) -> Self {
-        Self {
-            data: view.data,
-            device: view.device,
-            dtype: view.dtype,
-            shape: view.shape,
-            strides: view.strides,
-            _marker: PhantomData,
-        }
+        view.base
     }
 }
 
@@ -337,11 +379,65 @@ impl<'a> IntoDlTensorMut<'a> for DLTensorViewMut<'a> {
     }
 }
 
-impl<'a> IntoDlTensor<'a> for &'a ReturnedDLTensor<'a> {
+impl<'a, 'b> IntoDlTensor<'a> for &'b DLTensorView<'a> {
     fn into_dl_tensor(self) -> Result<DLTensorView<'a>, DLPackError> {
-        let managed = &self.managed;
+        Ok(DLTensorView {
+            data: self.data,
+            device: self.device,
+            dtype: self.dtype,
+            shape: self.shape.clone(),
+            strides: self.strides.clone(),
+            _marker: PhantomData,
+        })
+    }
+}
+
+impl<'a, 'b> IntoDlTensor<'a> for &'b DLTensorViewMut<'a> {
+    fn into_dl_tensor(self) -> Result<DLTensorView<'a>, DLPackError> {
+        self.deref().into_dl_tensor()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FFI accessor helper
+// ---------------------------------------------------------------------------
+
+/// Call a C accessor that fills in a [`DLManagedTensor`], extract its metadata
+/// into a read-only [`DLTensorView`], and run the DLPack deleter immediately.
+///
+/// The returned view's lifetime `'a` must be tied to the object that owns the
+/// underlying tensor data (for example `&'a self` on an index accessor).
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - `init` fully initializes the `DLManagedTensor` on success
+/// - the returned tensor data pointer stays valid for `'a`
+/// - on error, `init` leaves no cleanup obligation in the output slot; this
+///   helper only invokes the DLPack deleter after a successful `check_cuvs`
+pub(crate) unsafe fn view_from_ffi<'a, E>(
+    init: impl FnOnce(*mut ffi::DLManagedTensor) -> ffi::cuvsError_t,
+) -> Result<DLTensorView<'a>, E>
+where
+    E: From<LibraryError> + From<DLPackError>,
+{
+    let mut managed = MaybeUninit::<ffi::DLManagedTensor>::zeroed();
+    check_cuvs(init(managed.as_mut_ptr())).map_err(E::from)?;
+
+    // SAFETY: the caller's contract guarantees the closure fully initialized
+    // the struct on the success path.
+    let mut managed = unsafe { managed.assume_init() };
+
+    let result = (|| -> Result<DLTensorView<'a>, DLPackError> {
         let ndim = usize::try_from(managed.dl_tensor.ndim)
             .map_err(|_| DLPackError::InvalidMetadata("negative ndim"))?;
+
+        if managed.dl_tensor.byte_offset != 0 {
+            return Err(DLPackError::InvalidMetadata(
+                "non-zero byte_offset is not supported",
+            ));
+        }
+
         let (shape, strides) = if ndim == 0 {
             (&[][..], None)
         } else {
@@ -367,87 +463,178 @@ impl<'a> IntoDlTensor<'a> for &'a ReturnedDLTensor<'a> {
                 managed.dl_tensor.dtype,
             )
         }
+    })();
+
+    if let Some(deleter) = managed.deleter {
+        unsafe { deleter(&mut managed) };
     }
+
+    result.map_err(E::from)
 }
 
-// ---------------------------------------------------------------------------
-// ReturnedDLTensor — non-owning view returned from the C API
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod ffi_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A non-owning DLPack tensor view returned by the C API.
-///
-/// The underlying data is owned elsewhere (for example, by an index), while
-/// this wrapper owns only the returned `DLManagedTensor` metadata and calls the
-/// provided DLPack deleter on drop.
-#[must_use]
-pub struct ReturnedDLTensor<'a> {
-    managed: ffi::DLManagedTensor,
-    _owner: PhantomData<&'a ()>,
-}
-
-impl<'a> ReturnedDLTensor<'a> {
-    /// # Safety
-    ///
-    /// The `init` closure must fully initialize the `DLManagedTensor` when
-    /// it returns `CUVS_SUCCESS`.  In particular, `ndim`, `shape`, `strides`,
-    /// `device`, and `dtype` must describe valid, accessible memory.
-    pub(crate) unsafe fn from_ffi(
-        init: impl FnOnce(*mut ffi::DLManagedTensor) -> ffi::cuvsError_t,
-    ) -> Result<Self, LibraryError> {
-        let mut managed = MaybeUninit::<ffi::DLManagedTensor>::zeroed();
-        check_cuvs(init(managed.as_mut_ptr()))?;
-        Ok(Self {
-            // SAFETY: the caller's contract guarantees the closure fully
-            // initialized the struct on the success path.
-            managed: unsafe { managed.assume_init() },
-            _owner: PhantomData,
-        })
+    #[derive(Debug, thiserror::Error)]
+    enum ViewFromFfiTestError {
+        #[error(transparent)]
+        Library(#[from] LibraryError),
+        #[error(transparent)]
+        DLPack(#[from] DLPackError),
     }
 
-    pub fn ndim(&self) -> i32 {
-        self.managed.dl_tensor.ndim
-    }
+    static DELETER_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    pub fn shape(&self) -> &[i64] {
-        let n = self.ndim();
-        if n <= 0 {
-            return &[];
+    unsafe extern "C" fn free_test_metadata(tensor: *mut ffi::DLManagedTensor) {
+        DELETER_CALLS.fetch_add(1, Ordering::SeqCst);
+
+        let tensor = unsafe { &mut *tensor };
+        let ndim = tensor.dl_tensor.ndim as usize;
+
+        if !tensor.dl_tensor.shape.is_null() {
+            let shape = std::ptr::slice_from_raw_parts_mut(tensor.dl_tensor.shape, ndim);
+            unsafe { drop(Box::from_raw(shape)) };
+            tensor.dl_tensor.shape = std::ptr::null_mut();
         }
-        unsafe { slice::from_raw_parts(self.managed.dl_tensor.shape, n as usize) }
-    }
 
-    pub fn strides(&self) -> Option<&[i64]> {
-        let n = self.ndim();
-        if self.managed.dl_tensor.strides.is_null() || n <= 0 {
-            return None;
+        if !tensor.dl_tensor.strides.is_null() {
+            let strides = std::ptr::slice_from_raw_parts_mut(tensor.dl_tensor.strides, ndim);
+            unsafe { drop(Box::from_raw(strides)) };
+            tensor.dl_tensor.strides = std::ptr::null_mut();
         }
-        Some(unsafe { slice::from_raw_parts(self.managed.dl_tensor.strides, n as usize) })
     }
 
-    pub fn dtype(&self) -> ffi::DLDataType {
-        self.managed.dl_tensor.dtype
+    #[test]
+    fn view_from_ffi_copies_metadata_before_running_deleter() {
+        DELETER_CALLS.store(0, Ordering::SeqCst);
+
+        let view: Result<DLTensorView<'_>, ViewFromFfiTestError> = unsafe {
+            view_from_ffi(|ptr| {
+                let shape = Box::into_raw(vec![2_i64, 3].into_boxed_slice()) as *mut i64;
+                let strides = Box::into_raw(vec![3_i64, 1].into_boxed_slice()) as *mut i64;
+
+                (*ptr).dl_tensor.data = std::ptr::null_mut();
+                (*ptr).dl_tensor.device = ffi::DLDevice {
+                    device_type: ffi::DLDeviceType::kDLCPU,
+                    device_id: 0,
+                };
+                (*ptr).dl_tensor.ndim = 2;
+                (*ptr).dl_tensor.dtype = ffi::DLDataType {
+                    code: ffi::DLDataTypeCode::kDLFloat as u8,
+                    bits: 32,
+                    lanes: 1,
+                };
+                (*ptr).dl_tensor.shape = shape;
+                (*ptr).dl_tensor.strides = strides;
+                (*ptr).dl_tensor.byte_offset = 0;
+                (*ptr).manager_ctx = std::ptr::null_mut();
+                (*ptr).deleter = Some(free_test_metadata);
+
+                ffi::cuvsError_t::CUVS_SUCCESS
+            })
+        };
+        let view = view.unwrap();
+
+        assert_eq!(DELETER_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(view.ndim(), 2);
+        assert_eq!(view.shape(), &[2, 3]);
+        assert_eq!(view.strides(), Some(&[3, 1][..]));
+        assert_eq!(view.dtype().bits, 32);
+        assert_eq!(view.device().device_type, ffi::DLDeviceType::kDLCPU);
     }
 
-    pub fn device(&self) -> ffi::DLDevice {
-        self.managed.dl_tensor.device
-    }
-}
+    #[test]
+    fn view_from_ffi_rejects_negative_ndim() {
+        let err: Result<DLTensorView<'_>, ViewFromFfiTestError> = unsafe {
+            view_from_ffi(|ptr| {
+                (*ptr).dl_tensor.data = std::ptr::null_mut();
+                (*ptr).dl_tensor.device = ffi::DLDevice {
+                    device_type: ffi::DLDeviceType::kDLCPU,
+                    device_id: 0,
+                };
+                (*ptr).dl_tensor.ndim = -1;
+                (*ptr).dl_tensor.dtype = ffi::DLDataType {
+                    code: ffi::DLDataTypeCode::kDLFloat as u8,
+                    bits: 32,
+                    lanes: 1,
+                };
+                (*ptr).dl_tensor.shape = std::ptr::null_mut();
+                (*ptr).dl_tensor.strides = std::ptr::null_mut();
+                (*ptr).dl_tensor.byte_offset = 0;
+                (*ptr).manager_ctx = std::ptr::null_mut();
+                (*ptr).deleter = None;
 
-impl fmt::Debug for ReturnedDLTensor<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReturnedDLTensor")
-            .field("shape", &self.shape())
-            .field("strides", &self.strides())
-            .field("ndim", &self.ndim())
-            .finish()
-    }
-}
+                ffi::cuvsError_t::CUVS_SUCCESS
+            })
+        };
+        let err = err.unwrap_err();
 
-impl Drop for ReturnedDLTensor<'_> {
-    fn drop(&mut self) {
-        if let Some(deleter) = self.managed.deleter {
-            unsafe { deleter(&mut self.managed) };
-        }
+        assert!(err.to_string().contains("negative ndim"));
+    }
+
+    #[test]
+    fn view_from_ffi_rejects_null_shape_for_positive_rank() {
+        let err: Result<DLTensorView<'_>, ViewFromFfiTestError> = unsafe {
+            view_from_ffi(|ptr| {
+                (*ptr).dl_tensor.data = std::ptr::null_mut();
+                (*ptr).dl_tensor.device = ffi::DLDevice {
+                    device_type: ffi::DLDeviceType::kDLCPU,
+                    device_id: 0,
+                };
+                (*ptr).dl_tensor.ndim = 1;
+                (*ptr).dl_tensor.dtype = ffi::DLDataType {
+                    code: ffi::DLDataTypeCode::kDLFloat as u8,
+                    bits: 32,
+                    lanes: 1,
+                };
+                (*ptr).dl_tensor.shape = std::ptr::null_mut();
+                (*ptr).dl_tensor.strides = std::ptr::null_mut();
+                (*ptr).dl_tensor.byte_offset = 0;
+                (*ptr).manager_ctx = std::ptr::null_mut();
+                (*ptr).deleter = None;
+
+                ffi::cuvsError_t::CUVS_SUCCESS
+            })
+        };
+        let err = err.unwrap_err();
+
+        assert!(err.to_string().contains("shape pointer is null"));
+    }
+
+    #[test]
+    fn view_from_ffi_rejects_nonzero_byte_offset() {
+        DELETER_CALLS.store(0, Ordering::SeqCst);
+
+        let err: Result<DLTensorView<'_>, ViewFromFfiTestError> = unsafe {
+            view_from_ffi(|ptr| {
+                let shape = Box::into_raw(vec![4_i64].into_boxed_slice()) as *mut i64;
+
+                (*ptr).dl_tensor.data = std::ptr::null_mut();
+                (*ptr).dl_tensor.device = ffi::DLDevice {
+                    device_type: ffi::DLDeviceType::kDLCPU,
+                    device_id: 0,
+                };
+                (*ptr).dl_tensor.ndim = 1;
+                (*ptr).dl_tensor.dtype = ffi::DLDataType {
+                    code: ffi::DLDataTypeCode::kDLFloat as u8,
+                    bits: 32,
+                    lanes: 1,
+                };
+                (*ptr).dl_tensor.shape = shape;
+                (*ptr).dl_tensor.strides = std::ptr::null_mut();
+                (*ptr).dl_tensor.byte_offset = 4;
+                (*ptr).manager_ctx = std::ptr::null_mut();
+                (*ptr).deleter = Some(free_test_metadata);
+
+                ffi::cuvsError_t::CUVS_SUCCESS
+            })
+        };
+        let err = err.unwrap_err();
+
+        assert!(err.to_string().contains("byte_offset"));
+        assert_eq!(DELETER_CALLS.load(Ordering::SeqCst), 1);
     }
 }
 
@@ -459,11 +646,8 @@ impl Drop for ReturnedDLTensor<'_> {
 mod ndarray_impl {
     use super::*;
 
-    fn array_view<'a, A, D>(
-        arr: &'a ndarray::ArrayRef<A, D>,
-    ) -> Result<DLTensorView<'a>, DLPackError>
+    fn array_layout<A, D>(arr: &ndarray::ArrayRef<A, D>) -> (TensorDims, Option<TensorDims>)
     where
-        A: DType,
         D: ndarray::Dimension,
     {
         // TensorDims keeps ≤3 dims on the stack (covers the common case).
@@ -473,6 +657,17 @@ mod ndarray_impl {
         } else {
             Some(arr.strides().iter().map(|&s| s as i64).collect())
         };
+        (shape, strides)
+    }
+
+    fn array_view<'a, A, D>(
+        arr: &'a ndarray::ArrayRef<A, D>,
+    ) -> Result<DLTensorView<'a>, DLPackError>
+    where
+        A: DType,
+        D: ndarray::Dimension,
+    {
+        let (shape, strides) = array_layout(arr);
         // SAFETY: ArrayRef::as_ptr() points to valid, initialized storage
         // for the full extent of shape/strides/dtype for the lifetime 'a.
         unsafe {
@@ -496,12 +691,7 @@ mod ndarray_impl {
         A: DType,
         D: ndarray::Dimension,
     {
-        let shape: TensorDims = arr.shape().iter().map(|&d| d as i64).collect();
-        let strides: Option<TensorDims> = if arr.is_standard_layout() {
-            None
-        } else {
-            Some(arr.strides().iter().map(|&s| s as i64).collect())
-        };
+        let (shape, strides) = array_layout(arr);
         // SAFETY: ArrayRef::as_mut_ptr() points to valid, exclusively
         // writable storage for the full extent of shape/strides/dtype.
         unsafe {
@@ -582,13 +772,18 @@ mod tch_impl {
         }
     }
 
-    fn tensor_view<'a>(tensor: &'a tch::Tensor) -> Result<DLTensorView<'a>, DLPackError> {
+    fn tensor_layout(tensor: &tch::Tensor) -> (TensorDims, Option<TensorDims>) {
         let shape: TensorDims = tensor.size().into_iter().collect();
         let strides: Option<TensorDims> = if tensor.is_contiguous() {
             None
         } else {
             Some(tensor.stride().into_iter().collect())
         };
+        (shape, strides)
+    }
+
+    fn tensor_view<'a>(tensor: &'a tch::Tensor) -> Result<DLTensorView<'a>, DLPackError> {
+        let (shape, strides) = tensor_layout(tensor);
         // SAFETY: data_ptr() is valid for the tensor's shape/dtype for 'a.
         unsafe {
             DLTensorView::from_raw_parts(
@@ -604,12 +799,7 @@ mod tch_impl {
     fn tensor_view_mut<'a>(
         tensor: &'a mut tch::Tensor,
     ) -> Result<DLTensorViewMut<'a>, DLPackError> {
-        let shape: TensorDims = tensor.size().into_iter().collect();
-        let strides: Option<TensorDims> = if tensor.is_contiguous() {
-            None
-        } else {
-            Some(tensor.stride().into_iter().collect())
-        };
+        let (shape, strides) = tensor_layout(tensor);
         // SAFETY: data_ptr() is valid and exclusively writable for 'a.
         unsafe {
             DLTensorViewMut::from_raw_parts(
@@ -812,30 +1002,20 @@ mod tests {
     }
 
     #[test]
-    fn returned_tensor_from_ffi_zeroes_unwritten_fields() {
-        // SAFETY: the closure fully initializes every DLManagedTensor field.
-        let returned = unsafe {
-            ReturnedDLTensor::from_ffi(|ptr| {
-                (*ptr).dl_tensor.data = std::ptr::null_mut();
-                (*ptr).dl_tensor.device = ffi::DLDevice {
-                    device_type: ffi::DLDeviceType::kDLCPU,
-                    device_id: 0,
-                };
-                (*ptr).dl_tensor.ndim = 0;
-                (*ptr).dl_tensor.dtype = ffi::DLDataType {
-                    code: ffi::DLDataTypeCode::kDLFloat as u8,
-                    bits: 32,
-                    lanes: 1,
-                };
-                (*ptr).dl_tensor.shape = std::ptr::null_mut();
-                (*ptr).dl_tensor.strides = std::ptr::null_mut();
-                (*ptr).deleter = None;
-                ffi::cuvsError_t::CUVS_SUCCESS
-            })
-        }
-        .unwrap();
+    fn ndarray_mut_view_coerces_to_read_only_view_ref() {
+        let mut arr = Array2::<f32>::zeros((4, 5));
+        let dl = (&mut arr).into_dl_tensor_mut().unwrap();
 
-        assert_eq!(returned.managed.dl_tensor.byte_offset, 0);
-        assert!(returned.managed.manager_ctx.is_null());
+        let read_only: &DLTensorView<'_> = &dl;
+        assert_eq!(read_only.shape(), &[4, 5]);
+    }
+
+    #[test]
+    fn borrowed_mut_view_can_convert_into_read_only_view() {
+        let mut arr = Array2::<f32>::zeros((6, 7));
+        let dl = (&mut arr).into_dl_tensor_mut().unwrap();
+
+        let read_only = (&dl).into_dl_tensor().unwrap();
+        assert_eq!(read_only.shape(), &[6, 7]);
     }
 }
