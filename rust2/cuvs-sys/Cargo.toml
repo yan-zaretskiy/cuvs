@@ -14,11 +14,15 @@ license.workspace = true
 
 [features]
 default = []
-vendored = ["cmake"]
 generate-bindings = ["bindgen"]
+doc-only = []
 
 [build-dependencies]
 bindgen = { version = "0.72", optional = true }
-cmake = { version = "0.1", optional = true }
 cmake-package = "0.1"
 thiserror = "2.0.18"
+
+[package.metadata.docs.rs]
+# docs.rs builds have no CUDA or libcuvs. The doc-only feature skips native
+# library discovery, using pre-generated bindings instead.
+features = ["doc-only"]

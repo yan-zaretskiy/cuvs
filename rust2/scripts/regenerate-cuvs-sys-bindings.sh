@@ -55,7 +55,6 @@ if [[ -z "${target_dir}" ]]; then
   exit 1
 fi
 
-echo "Generating fresh cuvs-sys bindings into Cargo OUT_DIR..."
 cargo build \
   -p cuvs-sys \
   --features generate-bindings \
@@ -74,6 +73,8 @@ if [[ -z "${generated_file}" || ! -f "${generated_file}" ]]; then
   echo "Could not locate generated cuvs_bindings.rs in ${target_dir}/debug/build" >&2
   exit 1
 fi
+
+echo "Generated: ${generated_file}"
 
 if [[ "${mode}" == "check" ]]; then
   if cmp -s "${generated_file}" "${bindings_file}"; then

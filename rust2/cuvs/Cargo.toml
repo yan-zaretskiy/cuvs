@@ -10,11 +10,14 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 license.workspace = true
+readme = "README.md"
 build = "build.rs"
 
 [features]
 ndarray = ["dep:ndarray"]
 torch = ["dep:tch", "dep:torch-sys"]
+# Build documentation without native libraries. Used by docs.rs.
+doc-only = ["torch", "tch/doc-only", "torch-sys/doc-only", "cuvs-sys/doc-only"]
 
 [dependencies]
 cuvs-sys.workspace = true
@@ -29,3 +32,9 @@ ordered-float = { version = "5.3.0", default-features = false }
 [[example]]
 name = "cagra"
 required-features = ["torch"]
+
+[package.metadata.docs.rs]
+# Build docs with ndarray + torch impls visible, but without requiring
+# native libraries. The doc-only feature stubs out cuvs-sys, tch, and
+# torch-sys build scripts so docs can build without a GPU.
+features = ["ndarray", "doc-only"]

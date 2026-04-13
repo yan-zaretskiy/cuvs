@@ -4,7 +4,6 @@
  */
 
 use std::path::{Path, PathBuf};
-#[cfg(not(feature = "vendored"))]
 use std::process::Command;
 
 use cmake_package::find_package;
@@ -15,8 +14,6 @@ const CUVS_COMPONENT: &str = "c_api";
 const CUVS_C_API_TARGET: &str = "cuvs::c_api";
 const CUDA_TOOLKIT_TARGET: &str = "CUDA::toolkit";
 const DLPACK_TARGET: &str = "dlpack::dlpack";
-#[cfg(feature = "vendored")]
-const DEFAULT_CPP_SOURCE: &str = "../../cpp";
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct CuvsMetadata {
@@ -51,8 +48,7 @@ enum DiscoveryError {
          Install cuVS via one of:\n\
          - conda: conda install -c rapidsai libcuvs\n\
          - pip:   pip install libcuvs-cu<CUDA_VERSION>\n\
-         Or set CMAKE_PREFIX_PATH to point to your cuVS installation.\n\
-         Or enable the 'vendored' feature to build from source."
+         Or set CMAKE_PREFIX_PATH to point to your cuVS build/install directory."
     )]
     NotFound,
     /// The discovered package did not export the expected target.
@@ -163,18 +159,26 @@ fn try_find_cuvs_package(prefix: Option<PathBuf>) -> Result<CuvsMetadata, Discov
         .map(PathBuf::from)
         .ok_or(DiscoveryError::NotFound)?;
 
-    let cudatoolkit = find_cudatoolkit_package()?;
-    let cudatoolkit_target = find_target(&cudatoolkit, "CUDAToolkit", CUDA_TOOLKIT_TARGET)?;
-    let dlpack = find_dlpack_package()?;
-    let dlpack_target = find_target(&dlpack, "dlpack", DLPACK_TARGET)?;
-    let bindgen_include_dirs = target
-        .include_directories
-        .iter()
-        .chain(cudatoolkit_target.include_directories.iter())
-        .chain(dlpack_target.include_directories.iter())
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_dir())
-        .collect();
+    // CUDAToolkit and DLPack include directories are only needed for bindgen.
+    // When using pre-generated bindings (the default), skip their discovery —
+    // the cuvs CMake target already carries the transitive link flags we need.
+    let bindgen_include_dirs = if cfg!(feature = "generate-bindings") {
+        let cudatoolkit = find_cudatoolkit_package()?;
+        let cudatoolkit_target =
+            find_target(&cudatoolkit, "CUDAToolkit", CUDA_TOOLKIT_TARGET)?;
+        let dlpack = find_dlpack_package()?;
+        let dlpack_target = find_target(&dlpack, "dlpack", DLPACK_TARGET)?;
+        target
+            .include_directories
+            .iter()
+            .chain(cudatoolkit_target.include_directories.iter())
+            .chain(dlpack_target.include_directories.iter())
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_dir())
+            .collect()
+    } else {
+        vec![]
+    };
 
     let lib_dir = target
         .location
@@ -197,7 +201,6 @@ fn try_find_cuvs_package(prefix: Option<PathBuf>) -> Result<CuvsMetadata, Discov
 /// The pip package places files under `site-packages/libcuvs/lib64/cmake/cuvs/`,
 /// which CMake does not locate from a generic prefix path. Point `cuvs_DIR`
 /// directly at the package config directory for this discovery attempt.
-#[cfg(not(feature = "vendored"))]
 fn try_discover_pip() -> Result<CuvsMetadata, DiscoveryError> {
     let cmake_dir = pip_cuvs_cmake_dir().ok_or(DiscoveryError::NotFound)?;
     // SAFETY: build scripts are single-threaded, so mutating the process
@@ -208,7 +211,6 @@ fn try_discover_pip() -> Result<CuvsMetadata, DiscoveryError> {
 
 /// Try to find a pip-installed cuVS by locating `site-packages/libcuvs`.
 /// Checks both the active venv (via VIRTUAL_ENV) and the system python.
-#[cfg(not(feature = "vendored"))]
 fn pip_cuvs_cmake_dir() -> Option<PathBuf> {
     // If a venv is active, check its site-packages first.
     // Venvs have a single lib/python3.XX/ directory.
@@ -241,43 +243,10 @@ fn pip_cuvs_cmake_dir() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Vendored build
-// ---------------------------------------------------------------------------
-
-/// Build cuVS from source, then discover it via CMake against the install prefix.
-#[cfg(feature = "vendored")]
-fn locate_cuvs() -> Result<CuvsMetadata, DiscoveryError> {
-    let cpp_source =
-        std::env::var("CUVS_CPP_SOURCE").unwrap_or_else(|_| DEFAULT_CPP_SOURCE.to_owned());
-
-    // Tell Cargo to rerun build.rs when the C++ source tree changes.
-    println!("cargo::rerun-if-changed={cpp_source}");
-
-    let install_prefix = cmake::Config::new(&cpp_source)
-        .generator("Ninja")
-        .profile("Release")
-        .define("BUILD_C_LIBRARY", "ON")
-        .define("BUILD_TESTS", "OFF")
-        .define("BUILD_C_TESTS", "OFF")
-        .define("BUILD_CUVS_BENCH", "OFF")
-        .define("BUILD_SHARED_LIBS", "ON")
-        .define("BUILD_MG_ALGOS", "OFF")
-        .define("CUDA_LOG_COMPILE_TIME", "OFF")
-        .define("CUVS_NVTX", "ON")
-        .define("CMAKE_CUDA_ARCHITECTURES", "NATIVE")
-        .build();
-
-    // Point CMake at the freshly-built install and discover it like any other.
-    try_find_cuvs_package(Some(install_prefix))
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-/// Locate cuVS and emit all cargo link directives.
-/// Returns the include directory for bindgen or a typed discovery error.
-#[cfg(not(feature = "vendored"))]
+/// Locate cuVS: try CMake find_package first, fall back to pip-installed package.
 fn locate_cuvs() -> Result<CuvsMetadata, DiscoveryError> {
     match try_find_cuvs_package(None) {
         Ok(metadata) => Ok(metadata),
@@ -326,12 +295,11 @@ fn main() {
     println!("cargo::rerun-if-env-changed=CONDA_PREFIX");
     println!("cargo::rerun-if-env-changed=VIRTUAL_ENV");
     println!("cargo::rerun-if-env-changed=cuvs_DIR");
-    #[cfg(feature = "vendored")]
-    println!("cargo::rerun-if-env-changed=CUVS_CPP_SOURCE");
 
-    // docs.rs builds have no CUDA/cuVS. Skip discovery and linking entirely;
-    // the pre-generated bindings in src/bindings.rs are sufficient for docs.
-    if std::env::var("DOCS_RS").is_ok() {
+    // doc-only: skip native library discovery and linking entirely.
+    // The pre-generated bindings in src/bindings.rs are sufficient for
+    // building documentation without a GPU or cuVS install.
+    if cfg!(feature = "doc-only") {
         return;
     }
 

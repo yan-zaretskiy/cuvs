@@ -28,6 +28,19 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DEP_TCH_LIBTORCH_LIB");
     add_runtime_search_path("DEP_TCH_LIBTORCH_LIB");
 
-    println!("cargo:rustc-link-arg=-Wl,--no-as-needed");
-    println!("cargo:rustc-link-arg=-ltorch");
+    // Link libtorch_cuda so the CUDA dispatch backend registers its kernels.
+    // Without this, tch operations on Device::Cuda fail at runtime with
+    // "operator not available for CUDA backend".
+    //
+    // We use `rustc-link-lib` (not `rustc-link-arg`) because the former
+    // propagates transitively to downstream crates that depend on `cuvs`,
+    // whereas `rustc-link-arg` only applies to the declaring crate's own
+    // targets.
+    //
+    // The `+verbatim` modifier passes `--no-as-needed` for this specific lib
+    // so the linker doesn't strip it even though no Rust code references its
+    // symbols directly — the CUDA kernels register via a C++ global
+    // constructor.
+    println!("cargo:rustc-link-lib=dylib:+verbatim=libtorch_cuda.so");
+    println!("cargo:rustc-link-lib=dylib:+verbatim=libtorch.so");
 }

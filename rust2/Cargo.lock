@@ -181,15 +181,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cmake"
-version = "0.1.57"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "cmake-package"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -269,7 +260,6 @@ name = "cuvs-sys"
 version = "26.6.0"
 dependencies = [
  "bindgen",
- "cmake",
  "cmake-package",
  "thiserror 2.0.18",
 ]
